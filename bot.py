@@ -494,7 +494,8 @@ async def handle_ingredient_chat(update: Update, text: str, *, force: bool = Fal
         await update.effective_message.reply_text('Хорошо, добавление продукта отменено.')
         return True
     try:
-        change = await asyncio.to_thread(AI.parse_ingredient_change, text, pending)
+        parsing_text = ('Добавь в базу ингредиент: ' + text) if force else text
+        change = await asyncio.to_thread(AI.parse_ingredient_change, parsing_text, pending)
         if change.action == 'ignore' and not force:
             return False  # A regular meal sent while an addition is pending.
         if change.action == 'ignore' and force:
