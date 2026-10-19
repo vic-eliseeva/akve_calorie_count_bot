@@ -157,7 +157,7 @@ class NutritionAI:
                 item.estimated_per100_fat = item.estimated_per100_carbs = None
                 item.weight_estimated = False
                 item.estimate_note = ''
-            if photo and item.portion_g is not None:
+            if photo and not text.strip() and item.portion_g is not None:
                 item.weight_estimated = True
             if item.portion_g is not None and (not math.isfinite(item.portion_g) or item.portion_g <= 0):
                 item.portion_g = None
