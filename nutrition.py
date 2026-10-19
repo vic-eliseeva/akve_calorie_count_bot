@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -11,56 +12,47 @@ from google.genai import types
 
 
 class FoodItem(BaseModel):
-    name: str = Field(description="Ingredient or food with the portion included in the name")
-    kcal: float = Field(ge=0)
-    protein: float = Field(ge=0, description="Grams of protein")
-    fat: float = Field(ge=0, description="Grams of fat")
-    carbs: float = Field(ge=0, description="Grams of carbohydrates")
-    portion_g: float | None = Field(default=None, ge=0, description="Weight in grams of this specific food (not the whole meal)")
-    reference: str | None = Field(default=None, description="Canonical ingredient name from the provided Google Sheet or null")
+    name: str = Field(description="One ingredient name, without the portion weight")
+    portion_g: float | None = Field(default=None, description="Known weight in grams; unknown -> null")
+    reference: str | None = Field(default=None, description="Exact name or alias from provided ingredient list, otherwise null")
+    # Application-owned values, never trusted from AI.
+    kcal: float = 0
+    protein: float = 0
+    fat: float = 0
+    carbs: float = 0
+    per100_kcal: float | None = None
+    per100_protein: float | None = None
+    per100_fat: float | None = None
+    per100_carbs: float | None = None
+    source_tab: str = ''
 
 
 class FoodResult(BaseModel):
     action: Literal['log', 'question', 'ignore']
-    title: str = Field(description="Short descriptive meal title in input language")
+    title: str = ''
     items: list[FoodItem] = Field(default_factory=list)
-    assumptions: str = Field(description="Brief uncertainties such as unknown quantities/oils")
-    confidence: Literal['high', 'medium', 'low']
-    answer: str = Field(description="For action=question, answer succinctly in the user's language; otherwise empty")
+    assumptions: str = ''
+    confidence: Literal['high', 'medium', 'low'] = 'medium'
+    answer: str = ''
 
 
-PROMPT = """You are a precise bilingual (Russian/English) food diary nutrition interpreter for a private
-Telegram group. Read food descriptions, photos, or voice in Russian or English and calculate nutrition.
-Use common reference nutrient values; nutrition values are estimates, not lab measurements.
-Rules:
-- action='log' ONLY when user clearly says they ATE/DRANK a food, or commands you to log it.
-- action='question' when user asks for a calorie estimate or describes a batch recipe without saying
-  they ate it. Provide calculations in answer but DO NOT add to the diary.
-- action='ignore' for ordinary chat or unrelated content; do not answer.
-- If photo has no caption, default to 'log' when it depicts food; flag portions as visual estimates.
-- Include separate line items for ALL foods with stated quantities. Use grams, not implied servings,
-  and accurately distinguish uncooked from cooked quantities.
-- Respect branded nutrition labels and user-stated nutrition values over generic database estimates.
-- Count oils, sauces, drinks and additions if specified. If not specified, don't invent exact oil weights;
-  mention what you assumed, and put confidence low for ambiguous portions.
-- If user describes a whole recipe, do NOT log the whole batch as a meal unless explicitly eaten.
-- Never hallucinate that 'skyr' or substitute ingredients were used when user did not mention them.
-- Every FoodItem's macros correspond to that item's total portion, NOT values per 100g.
-- Calories should be consistent with macronutrients when possible, allowing for fiber and rounding.
-- For a meal with a precise recipe, calculate using all quantities, no unexplained generic item.
-- For corrections, use the provided ORIGINAL MEAL details, change ONLY what is requested and
-  recompute the full meal. Return action='log'.
-- Interpret text and Telegram audio in either Russian or English, including mixed-language notes.
-- When GOOGLE SHEET REFERENCE INGREDIENTS are supplied, match food names in Russian or English
-  via their exact names and aliases. Set `reference` to the canonical ingredient name, and
-  `portion_g` to the weight for that ingredient only. Preserve the dry/cooked distinction.
-  The application calculates its nutrition exactly from the Google Sheet per-100g row.
-- If there is no confident reference match, set reference=null and estimate normally.
-- Never invent a known ingredient match for unrelated items or unknown portion sizes.
-- Respond using user's language for meal title, assumptions and answer.
-- No health, dieting or weight-loss coaching; nutrition bookkeeping only.
+PROMPT = """You extract food ingredient names and consumed weights for two people sharing
+a Russian/English Telegram food diary. You DO NOT calculate calorie or macro values.
+Only the authoritative Google Sheet has calories, protein, fat, and carbohydrates.
+Extract EACH ingredient separately, including oil, sauces, drinks, and additions.
+Do not invent ingredients, weights, nutritional values or assumptions.
+- Ingredient name is without grams; portion_g is the known weight in grams.
+- If the quantity is unknown, portion_g=null. Photos alone cannot accurately weigh food.
+- Only match a name to the explicitly provided ingredient reference list. For exact,
+  confident matching, set reference to canonical name or alias; otherwise null.
+- Be careful with raw versus cooked weights. Never guess oil amounts.
+- action=log only when food was actually eaten/drunk or /log is explicitly used.
+- action=question for recipes, hypothetical food, macro calculations or estimation requests.
+- action=ignore for messages that are not about food or meals.
+- When correcting a meal, return ALL ingredients with corrected amounts; retain unchanged items.
+- Handle both Russian and English text and voice, including mixed-language messages.
+- Respond in the user's language; don't assert that a meal was saved.
 """
-
 
 class NutritionAI:
     def __init__(self, api_key: str, model: str):
@@ -85,10 +77,8 @@ class NutritionAI:
         else:
             instruction += "\nText or photo caption: " + (text or '(no text)')
         if references:
-            ingredients = [{'name': i.name, 'aliases': list(i.aliases), 'kcal': i.kcal,
-                            'protein': i.protein, 'fat': i.fat, 'carbs': i.carbs}
-                           for i in references]
-            instruction += "\nGOOGLE SHEET REFERENCE INGREDIENTS, macros per 100g: " + json.dumps(ingredients, ensure_ascii=False)
+            ingredients = [{'name': i.name, 'aliases': list(i.aliases)} for i in references]
+            instruction += "\nGOOGLE SHEET REFERENCE INGREDIENT NAMES/ALIASES ONLY: " + json.dumps(ingredients, ensure_ascii=False)
         contents: list = [instruction]
         if media is not None:
             contents.append(types.Part.from_bytes(data=media, mime_type=mime or 'application/octet-stream'))
@@ -108,7 +98,11 @@ class NutritionAI:
         if correction or force_log:
             if result.action == 'question' and result.items:
                 result.action = 'log'
-        if references:
-            from google_sheets import apply_reference_macros
-            apply_reference_macros(result, references)
+        # Completely discard any nutritional numbers the AI may have generated.
+        for item in result.items:
+            item.kcal = item.protein = item.fat = item.carbs = 0
+            item.per100_kcal = item.per100_protein = item.per100_fat = item.per100_carbs = None
+            item.source_tab = ''
+            if item.portion_g is not None and (not math.isfinite(item.portion_g) or item.portion_g <= 0):
+                item.portion_g = None
         return result
