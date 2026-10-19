@@ -258,6 +258,8 @@ async def analyze(text: str, media: bytes | None = None, mime: str | None = None
     if result.action != 'ignore':
         allow_estimates = photo or bool(result.restaurant_estimate)
         await asyncio.to_thread(calculate_from_table, result, references, ONLINE_LOOKUP.resolve, allow_estimates)
+        if any(item.weight_estimated or item.source_tab.startswith('ОЦЕНКА ИИ') for item in result.items):
+            result.confidence = 'low'
     return result
 
 async def sync_day(day: str) -> int:
@@ -302,7 +304,7 @@ async def save_and_confirm(update: Update, result: FoodResult, text: str, source
         if 'UNIQUE constraint failed' in str(exc):
             return
         raise
-    message = breakdown(ingredients(result), result.title, heading=f'Saved #{mid}')
+    message = breakdown(ingredients(result), result.title, heading=f'Записала #{mid}')
     message += '\nМожешь ответить на это сообщение, чтобы исправить состав или вес.'
     reply_id = await show_long_reply(update, message)
     DB.set_response_message(mid, reply_id)
@@ -379,7 +381,7 @@ async def revise_meal(update: Update, meal: dict | None, correction: str):
         DB.update_meal(ALLOWED_CHAT_ID, update.effective_user.id, meal['id'],
                        result.title or meal['title'], meal['source_text'] + '\nCorrection: ' + correction,
                        ingredients(result), result.assumptions, result.confidence)
-        detail = breakdown(ingredients(result), result.title or meal['title'], heading=f"Updated #{meal['id']}")
+        detail = breakdown(ingredients(result), result.title or meal['title'], heading=f"Исправила #{meal['id']}")
         sent_id = await show_long_reply(update, detail)
         DB.set_response_message(meal['id'], sent_id)
         await sync_past(meal['day'])
@@ -399,7 +401,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await demand_owner(update):
         return
     if len(context.args) < 2 or not context.args[0].isdigit():
-        await update.effective_message.reply_text('Usage: /edit 12 oil was 5g instead of 10g')
+        await update.effective_message.reply_text('Пример: /edit 12 масла было 5 г, а не 10 г')
         return
     await revise_meal(update, DB.by_id(ALLOWED_CHAT_ID, int(context.args[0])), ' '.join(context.args[1:]))
 
@@ -447,12 +449,12 @@ async def copy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         new_id = DB.add_meal(chat_id=ALLOWED_CHAT_ID, user_id=update.effective_user.id,
                              day=now_local().date().isoformat(), now=now_local().isoformat(),
-                             title=f"{source['title']} ×{factor:g}", source_text=f'Copy #{mid} ×{factor:g}',
+                             title=f"{source['title']} ×{factor:g}", source_text=f'Копия #{mid} ×{factor:g}',
                              source_kind='copy', items=items,
-                             assumptions=f'Copied from entry #{mid}; same saved spreadsheet macros.',
-                             confidence='high', source_message_id=update.effective_message.message_id)
+                             assumptions=f'Копия записи #{mid}; те же справочные значения.',
+                             confidence=source['confidence'], source_message_id=update.effective_message.message_id)
         reply_id = await show_long_reply(update,
-              breakdown(items, f"{source['title']} ×{factor:g}", heading=f'Saved #{new_id}'))
+              breakdown(items, f"{source['title']} ×{factor:g}", heading=f'Записала #{new_id}'))
         DB.set_response_message(new_id, reply_id)
     except Exception:
         logger.exception('Copy failed')
@@ -554,7 +556,7 @@ async def ingredient_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = ' '.join(context.args).strip()
     if not query:
-        await update.effective_message.reply_text('Usage: /ingredient творог 1.5%')
+        await update.effective_message.reply_text('Пример: /ingredient творог 1.5%')
         return
     try:
         found = build_lookup(await asyncio.to_thread(SHEETS.ingredients)).get(normalize_name(query))
@@ -597,7 +599,7 @@ async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             today = now_local().date()
             days = [(today - timedelta(days=1)).isoformat(), today.isoformat()]
         total = sum([await sync_day(day) for day in days])
-        await update.effective_message.reply_text(f'Google Sheet обновлён: {", ".join(days)} ({total} person/day rows). Повторный запуск обновит строки без дубликатов.')
+        await update.effective_message.reply_text(f'Google Sheet обновлён: {", ".join(days)} ({total} строк по участникам). Повторный запуск обновит строки без дубликатов.')
     except Exception as exc:
         logger.exception('Manual Google Sheets sync failed')
         await update.effective_message.reply_text(f'Не удалось синхронизировать: {str(exc)[:450]}')
@@ -609,7 +611,7 @@ async def sheetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         items = await asyncio.to_thread(SHEETS.ingredients)
         await update.effective_message.reply_text(
-            f'Google Sheet подключён. Продуктов: {len(items)} saved ingredients.\n'
+            f'Google Sheet подключён. Продуктов: {len(items)} ингредиентов.\n'
             f'Листы продуктов: База продуктов, База ингредиентов, Ingredients base\nЛист ежедневных итогов: {SHEETS.daily_tab}\n'
             'Автоматический экспорт: 00:05 Europe/Copenhagen (previous day).')
     except Exception as exc:
