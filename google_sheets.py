@@ -219,16 +219,24 @@ class GoogleSheets:
             for idx, row in enumerate(rows[1:], 2):
                 if len(row) < 6 or not str(row[1]).strip():
                     continue
-                try:
-                    kcal, protein, fat, carbs = [float(str(x).replace(',', '.')) for x in row[2:6]]
-                except (TypeError, ValueError):
-                    continue  # Non-nutrition notes/placeholders retain their exact source data.
                 name = str(row[1]).strip()
+                nutrients = row[2:6]
+                aliases_from_translation = ()
+                # The lower part of the Russian sheet has Danish in B, Russian in D,
+                # and kcal/P/F/C in E:H instead of C:F. Keep the source untouched.
+                if tab == 'База ингредиентов' and len(row) >= 8 and not str(row[2]).strip():
+                    if str(row[3]).strip():
+                        aliases_from_translation = (str(row[3]).strip(),)
+                    nutrients = row[4:8]
+                try:
+                    kcal, protein, fat, carbs = [float(str(x).replace(',', '.')) for x in nutrients]
+                except (TypeError, ValueError):
+                    continue  # Incomplete recipes/translations retain exact source values.
                 # Custom products sometimes list synonyms separated by commas.
                 variants = [part.strip() for part in name.split(',') if part.strip()] if tab == 'База продуктов' else [name]
                 if not variants:
                     continue
-                add(Ingredient(variants[0], tuple(variants[1:]), kcal, protein, fat, carbs,
+                add(Ingredient(variants[0], tuple(variants[1:]) + aliases_from_translation, kcal, protein, fat, carbs,
                                notes=str(row[0]) if row[0] is not None else ''))
         return references
 
