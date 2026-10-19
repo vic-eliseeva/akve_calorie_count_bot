@@ -65,6 +65,11 @@ class FoodDB:
                     FOREIGN KEY(telegram_user_id) REFERENCES members(telegram_user_id),
                     UNIQUE(chat_id, telegram_user_id, source_message_id)
                 );
+                CREATE TABLE IF NOT EXISTS pending_ingredients (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_meal_day ON meals(chat_id, day, telegram_user_id);
                 CREATE INDEX IF NOT EXISTS idx_meal_response ON meals(chat_id, response_message_id);
             """)
@@ -95,6 +100,22 @@ class FoodDB:
                 (user_id, chat_id, name, now),
             )
             return True, "joined"
+
+    def pending_ingredient(self, user_id: int) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT payload_json FROM pending_ingredients WHERE telegram_user_id=?", (user_id,)).fetchone()
+            return json.loads(row["payload_json"]) if row else None
+
+    def save_pending_ingredient(self, user_id: int, data: dict) -> None:
+        with self.connect() as conn:
+            conn.execute("""INSERT INTO pending_ingredients (telegram_user_id,payload_json,updated_at)
+                            VALUES (?,?,?) ON CONFLICT(telegram_user_id)
+                            DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at""",
+                         (user_id, json.dumps(data, ensure_ascii=False), datetime.now().isoformat()))
+
+    def clear_pending_ingredient(self, user_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM pending_ingredients WHERE telegram_user_id=?", (user_id,))
 
     def set_goals(self, user_id: int, calories: float, protein: float) -> None:
         with self.connect() as db:
