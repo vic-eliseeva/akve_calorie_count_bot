@@ -69,46 +69,63 @@ class MissingReferences(ValueError):
         super().__init__('Unknown ingredient or portion. Nothing may be logged.')
 
 
-def calculate_from_table(result, references: list[Ingredient], online_lookup=None):
-    """Reference-first deterministic arithmetic; accept online only from verified USDA.
+def calculate_from_table(result, references: list[Ingredient], online_lookup=None,
+                         allow_estimates: bool = False):
+    """First spreadsheet; then validated USDA; lastly visibly labeled restaurant estimate.
 
-    The entire meal is blocked if even one ingredient/weight cannot be validated.
+    All meals reject incomplete items rather than silently omitting components.
     """
     lookup = build_lookup(references)
     missing, missing_weights = [], []
     for item in result.items:
-        # Always disregard any nutrient numbers supplied by a language model.
         item.kcal = item.protein = item.fat = item.carbs = 0
-        key = normalize_name(item.reference or '')
-        if not key or key not in lookup:
-            key = normalize_name(item.name)
-        source = lookup.get(key)
+        item.source_url = ''
+        item.per100_kcal = item.per100_protein = item.per100_fat = item.per100_carbs = None
+        item.source_tab = ''
         grams = item.portion_g
         if grams is None or not math.isfinite(grams) or grams <= 0 or grams > 100000:
             missing_weights.append(item.name)
             continue
+        key = normalize_name(item.reference or '')
+        if not key or key not in lookup:
+            key = normalize_name(item.name)
+        source = lookup.get(key)
         if source is None and online_lookup is not None:
             source = online_lookup(item)
             if source is not None:
+                item.source_tab = 'USDA FoodData Central (среднее онлайн)'
+                item.source_url = source.url
                 item.reference = source.description
                 item.name = source.name
-                item.source_tab = 'USDA FoodData Central (online estimate)'
-                item.source_url = source.url
         if source is None:
+            estimated = [getattr(item, 'estimated_per100_'+nutrient, None)
+                         for nutrient in ('kcal','protein','fat','carbs')]
+            safe = (allow_estimates and not getattr(item, 'simple_ingredient', False)
+                    and bool(str(getattr(item, 'estimate_note', '') or '').strip())
+                    and all(isinstance(x, (int, float)) and math.isfinite(x) for x in estimated)
+                    and 0 < estimated[0] <= 1000
+                    and all(0 <= x <= 100 for x in estimated[1:]))
+            if safe:
+                item.reference = item.name
+                item.source_tab = 'ОЦЕНКА ИИ по фото/описанию (не справочник)'
+                item.source_url = ''
+                for nutrient, value in zip(('kcal','protein','fat','carbs'), estimated):
+                    setattr(item, 'per100_'+nutrient, value)
+                    setattr(item, nutrient, round(value * grams / 100, 2))
+                continue
             missing.append(item.name)
             continue
-        if not getattr(item, 'source_url', ''):
+        if not item.source_url:
             item.reference = source.name
             item.name = source.name
             item.source_tab = source.source_tab
-            item.source_url = ''
-        for nutrient in ('kcal', 'protein', 'fat', 'carbs'):
+        for nutrient in ('kcal','protein','fat','carbs'):
             per100 = getattr(source, nutrient)
-            setattr(item, f'per100_{nutrient}', per100)
-            setattr(item, nutrient, round(per100 * grams / 100.0, 2))
+            setattr(item, 'per100_'+nutrient, per100)
+            setattr(item, nutrient, round(per100 * grams / 100, 2))
     if missing or missing_weights or not result.items:
         if not result.items:
-            missing.append('No identifiable ingredient')
+            missing.append('Не удалось распознать ингредиенты')
         raise MissingReferences(missing, missing_weights)
 
 class SheetsError(RuntimeError):
