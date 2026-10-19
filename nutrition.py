@@ -20,6 +20,12 @@ class FoodItem(BaseModel):
     lookup_query: str | None = Field(default=None, description='Short English singular name for a generic whole food not found in the sheet, e.g. banana or mango; null otherwise')
     simple_ingredient: bool = Field(default=False, description='True only for one basic unbranded, single-ingredient food, never a mixed prepared meal, recipe, flavored or branded product')
     source_url: str = ''
+    weight_estimated: bool = False
+    estimate_note: str = ''
+    estimated_per100_kcal: float | None = None
+    estimated_per100_protein: float | None = None
+    estimated_per100_fat: float | None = None
+    estimated_per100_carbs: float | None = None
     kcal: float = 0
     protein: float = 0
     fat: float = 0
@@ -38,33 +44,34 @@ class FoodResult(BaseModel):
     assumptions: str = ''
     confidence: Literal['high', 'medium', 'low'] = 'medium'
     answer: str = ''
+    restaurant_estimate: bool = False
 
 
-PROMPT = """Extract ingredient names and measured quantities for a Russian/English food diary.
-NEVER calculate or invent kcal, protein, fat or carbohydrates. Numeric
-nutrients come ONLY from the spreadsheet or verified USDA online lookup done by the application.
-Identify EVERY ingredient separately, including oil, sauce and drinks.
-- Google Sheet matches always take priority. For other simple, unbranded, ONE-ingredient foods
-  such as raw banana or mango, set simple_ingredient=true and lookup_query to the
-  exact generic English food name, e.g. "banana" or "mango".
-- For any mixed dish (lasagna, restaurant food, stew, cake, smoothie, etc.), composite food,
-  branded item, unclear variety/cooking state, or a guessed recipe: simple_ingredient=false.
-  Split the dish into ingredients only if the user provided them. Never assume a recipe.
-- lookup_query does not supply nutritional facts; the app independently queries USDA
-  and accepts only sufficiently exact matches. If uncertain, ask the user instead.
-- Ingredient name must exclude the weight; portion_g is grams or null if not known.
-- Never invent weights, calorie values, ingredients or substitutes.
-- Accept English/Russian text, voice, images and mixed-language messages.
-- For photos without a known weight, return null grams and request clarification.
-- Only set reference to an EXACT, confident Google Sheet name or alias; otherwise null.
-  Distinguish cooked from raw weights, brands, and fat percentages.
-- action=log if a meal was eaten or user explicitly uses /log; action=question for
-  recipes and calculation requests; action=ignore for unrelated chat.
-- For corrections return every ingredient (including unchanged ones), with original weights
-  preserved except where the user explicitly changes them.
-- Never claim food was saved. The app validates ALL ingredients before logging.
+PROMPT = """Ты русскоязычный ассистент дневника питания. Распознавай текст, голос,
+фото на русском, английском и смешанном языке. ВСЕ ответы и названия — на русском.
+Распознавай фразы «добавь мне», «вот мой обед», «here is my lunch», «I ate»
+как съеденную еду, action=log. Вопрос о калориях или целом рецепте без
+упоминания еды — action=question; посторонняя беседа — action=ignore.
+Извлекай КАЖДЫЙ ингредиент отдельно, масла, соусы и напитки, если известны.
+Для простого неизвестного продукта (банан, манго) укажи simple_ingredient=true
+и краткий английский lookup_query. Точное совпадение в таблице: reference.
+НЕ придумывай макросы обычных ингредиентов — их считает приложение.
+
+Для ФОТО еды, ресторанного/столового обеда, либо явной просьбы о ПРИМЕРНОЙ
+оценке разрешена визуальная/контекстная оценка граммов: weight_estimated=true,
+estimate_note поясняет оценку. restaurant_estimate=true только для явно
+описанного кафе/столовой/ресторанного блюда или явной просьбы прикинуть.
+Если состав различим, разделяй компоненты без двойного учёта. Если блюдо
+НЕРАЗДЕЛИМОЕ и нет точного справочного значения, можешь поставить
+estimated_per100_kcal/protein/fat/carbs как ГРУБУЮ ИИ-оценку на 100г,
+estimate_note ОБЯЗАТЕЛЬНО объясняет неопределённость. Для базовых продуктов
+не ставь estimated_per100, используй справочник или USDA через приложение.
+Не выдумывай скрытые ингредиенты, невидимые добавки или точность измерения.
+Если блюдо непонятно — проси пояснение. Фото без подписи с едой обычно log.
+Для обычных домашних текстовых блюд без просьбы об оценке или кафе неизвестный
+рецепт не оценивай, уточняй состав. Для коррекций сохрани неизменённые позиции.
+Никогда не утверждай, что запись уже сохранена.
 """
-
 
 class NutritionAI:
     def __init__(self, api_key: str, model: str):
@@ -73,7 +80,7 @@ class NutritionAI:
 
     def interpret(self, *, text: str = '', media: bytes | None = None, mime: str | None = None,
                   force_log: bool = False, correction: dict | None = None,
-                  references: list | None = None) -> FoodResult:
+                  references: list | None = None, photo: bool = False) -> FoodResult:
         instruction = 'Extract all ingredient names and verified gram quantities.'
         if force_log:
             instruction += ' The user requests logging (only if complete and verified).'
@@ -88,6 +95,8 @@ class NutritionAI:
         instruction += '\nEXACT known Google Sheet names and aliases: ' + json.dumps([
             {'name': item.name, 'aliases': list(item.aliases)}
             for item in (references or [])], ensure_ascii=False)
+        if photo:
+            instruction += '\nЭто фото: оцени видимые граммы, пометь вес как приблизительный.'
         contents = [instruction]
         if media is not None:
             contents.append(types.Part.from_bytes(data=media, mime_type=mime or 'application/octet-stream'))
@@ -108,6 +117,13 @@ class NutritionAI:
             item.per100_kcal = item.per100_protein = item.per100_fat = item.per100_carbs = None
             item.source_tab = ''
             item.source_url = ''
+            if not (photo or result.restaurant_estimate):
+                item.estimated_per100_kcal = item.estimated_per100_protein = None
+                item.estimated_per100_fat = item.estimated_per100_carbs = None
+                item.weight_estimated = False
+                item.estimate_note = ''
+            if photo and item.portion_g is not None:
+                item.weight_estimated = True
             if item.portion_g is not None and (not math.isfinite(item.portion_g) or item.portion_g <= 0):
                 item.portion_g = None
         return result
