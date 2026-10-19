@@ -34,36 +34,34 @@ AI: NutritionAI | None = None
 SHEETS: GoogleSheets | None = None
 ONLINE_LOOKUP = USDAFoodLookup()
 
-HELP_TEXT = """Two-person food diary / Дневник питания на двоих
+HELP_TEXT = """Дневник питания для двоих
 
-1. Each person sends /join once in this group.
-2. Send a food description, photo, or voice note to log what you ate.
-3. Each person's entries and daily totals stay separate.
+Пиши обычным текстом или отправляй фото и голосовые сообщения:
+• «Добавь мне 150 г манго и 100 г банана»
+• «Вот мой обед» + фото — я примерно оценю порцию, укажу допущения
+• «Я поела пасту в столовой» — оценка блюда с предупреждением
+• «Сколько КБЖУ в 200 г риса?» — рассчитаю, но не запишу
+• «Добавь в базу сыр X: на 100 г 250 ккал, Б 20, Ж 18, У 2»
+  Можно уточнять недостающие значения следующими сообщениями.
+Справочник → USDA → явно помеченная примерная оценка кафе/фото.
+Всегда показываю расчёт по каждому ингредиенту и источники.
 
-Commands:
-/join — register your Telegram account (max. 2)
-/today — both people's totals today
-/mine — your meals and macros today
-/yesterday — both people's totals yesterday
-/goal 2200 150 — set YOUR calories and protein targets
-/estimate chicken 200g... — calculate without logging
-/log chicken 200g... — force a food log
-/editlast rice was 250g cooked — correct your most recent entry
-/edit 12 oil was 5g — correct your entry #12
-/undo — delete your latest entry
-/copy 12 0.75 — log 75% of any meal #12 as YOUR portion
-/export — CSV of both diaries, compatible with Google Sheets
-/ingredientadd ru|en|custom | name | kcal | protein | fat | carbs — add supplied per-100g values to original tabs
-/ingredient name — look up a stored ingredient or alias (Russian/English)
-/ingredients — list stored ingredients
-/sync — update current and yesterday's totals in the Google Sheet
-/sync YYYY-MM-DD — resync a specific date
-/sheetstatus — check your connected Google Sheet
-/chatid — show the ID of this group, for initial setup
-/help — this message
-
-Tip: reply directly to the bot's meal confirmation with a correction.
-Russian & English supported. Sheet values first; cited USDA averages for basic foods.\nNo invented recipes or weights: uncertain mixed meals require details.
+Команды необязательны для еды и добавления ингредиентов:
+/join — подключить себя (не больше двух участников)
+/today — сумма КБЖУ обоих за сегодня
+/mine — мои блюда
+/yesterday — вчерашние суммы
+/goal 2200 150 — установить суточную цель
+/editlast ... — исправить последнее блюдо
+/undo — удалить последнюю запись
+/copy ID 0.5 — скопировать половину блюда
+/ingredient NAME — найти продукт в справочнике
+/ingredientadd — вручную добавить продукт в базу
+/sync — синхронизировать Google Sheet
+/sheetstatus — состояние Google Sheets
+/chatid — ID группы
+/help — помощь
+Для исправления можно ответить прямо на расчёт бота.
 """
 
 
@@ -88,10 +86,10 @@ def owner(update: Update) -> dict | None:
 
 async def demand_owner(update: Update) -> bool:
     if not permitted(update):
-        await update.effective_message.reply_text('This group is not configured. Send /chatid, set ALLOWED_CHAT_ID on the server, and restart.')
+        await update.effective_message.reply_text('Группа пока не настроена. Отправь /chatid, укажи ALLOWED_CHAT_ID в Railway и перезапусти бота.')
         return False
     if owner(update) is None:
-        await update.effective_message.reply_text('Please register first with /join. Only two people can join.')
+        await update.effective_message.reply_text('Сначала отправь /join. В дневнике могут быть два человека.')
         return False
     return True
 
@@ -102,22 +100,22 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_group(update):
-        await update.effective_message.reply_text('Create a Telegram group with your partner and this bot, then send /chatid in that group.')
+        await update.effective_message.reply_text('Создай группу с партнёром и ботом, затем отправь туда /chatid.')
         return
-    await update.effective_message.reply_text(f'Group ID: {update.effective_chat.id}\nCopy it into ALLOWED_CHAT_ID in your bot settings. Do not share your bot token.')
+    await update.effective_message.reply_text(f'Group ID: {update.effective_chat.id}\nСкопируй этот ID в переменную ALLOWED_CHAT_ID в Railway. Сам токен бота никому не отправляй.')
 
 
 async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not permitted(update):
-        await update.effective_message.reply_text('First configure ALLOWED_CHAT_ID. Send /chatid in your group.')
+        await update.effective_message.reply_text('Сначала настрой ALLOWED_CHAT_ID. Отправь /chatid в вашу группу.')
         return
     u = update.effective_user
     name = u.first_name + (f' {u.last_name}' if u.last_name else '')
     ok, reason = DB.join(update.effective_chat.id, u.id, name, now_local().isoformat())
     if ok:
-        reply = f'{name}: ' + ('already registered.' if reason == 'already' else 'registered. Now send food text, photos or voice notes.')
+        reply = f'{name}: ' + ('уже подключён(а).' if reason == 'already' else 'подключён(а). Теперь можно писать про еду, отправлять голосовые и фото.')
     else:
-        reply = 'The diary already has two people.' if reason == 'full' else 'This Telegram user belongs to a different diary.'
+        reply = 'К дневнику уже подключены два человека.' if reason == 'full' else 'Этот аккаунт уже привязан к другой группе.'
     await update.effective_message.reply_text(reply)
 
 
@@ -125,17 +123,17 @@ async def goal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await demand_owner(update):
         return
     if len(context.args) != 2:
-        await update.effective_message.reply_text('Usage: /goal 2200 150  (kcal and protein grams)')
+        await update.effective_message.reply_text('Пример команды: /goal 2200 150 — цель по калориям и белкам.')
         return
     try:
         calories, protein = [float(s.replace(',', '.')) for s in context.args]
         if not (500 <= calories <= 10000 and 0 <= protein <= 500):
             raise ValueError('out of range')
     except ValueError:
-        await update.effective_message.reply_text('Use sensible positive numbers, e.g. /goal 2200 150')
+        await update.effective_message.reply_text('Укажи разумные положительные числа, например /goal 2200 150.')
         return
     DB.set_goals(update.effective_user.id, calories, protein)
-    await update.effective_message.reply_text(f'Your targets: {calories:g} kcal and {protein:g} g protein daily. Your partner has independent targets.')
+    await update.effective_message.reply_text(f'Твои цели: {calories:g} kcal and {protein:g} g protein daily. У партнёра отдельные цели.')
 
 
 def fmt(n: float | int) -> str:
@@ -155,17 +153,17 @@ def day_report(chat_id: int, day: str, only_user: int | None = None, detailed: b
     members = DB.members(chat_id)
     if only_user is not None:
         members = [m for m in members if m['telegram_user_id'] == only_user]
-    lines = [f'Food diary · {day}']
+    lines = [f'Дневник питания · {day}']
     for m in members:
         meals = DB.daily(chat_id, day, m['telegram_user_id'])
         t = sum_meals(meals)
         lines.append(f"\n{m['name']}: {macros(t)}")
         if m['calories_goal'] is not None:
-            lines.append(f"Targets: {fmt(t['kcal'])}/{fmt(m['calories_goal'])} kcal; protein {fmt(t['protein'])}/{fmt(m['protein_goal'])}g")
+            lines.append(f"Цели: {fmt(t['kcal'])}/{fmt(m['calories_goal'])} kcal; protein {fmt(t['protein'])}/{fmt(m['protein_goal'])}g")
         if detailed:
             lines.extend(f"  #{x['id']} {x['title']} — {fmt(x['kcal'])} kcal" for x in meals[-20:])
         if not meals:
-            lines.append('  No meals logged.')
+            lines.append('  Пока нет записанных блюд.')
     return '\n'.join(lines)[:3900]
 
 
@@ -290,7 +288,7 @@ async def nightly_sync(context: ContextTypes.DEFAULT_TYPE):
 
 async def save_and_confirm(update: Update, result: FoodResult, text: str, source_kind: str):
     if not result.items:
-        await update.effective_message.reply_text('Nothing saved: list ingredients and measured grams.')
+        await update.effective_message.reply_text('Пока ничего не записала. Напиши, что ты ел(а), и примерно сколько.')
         return
     stamp = now_local()
     try:
@@ -305,7 +303,7 @@ async def save_and_confirm(update: Update, result: FoodResult, text: str, source
             return
         raise
     message = breakdown(ingredients(result), result.title, heading=f'Saved #{mid}')
-    message += '\nReply to this confirmation to correct the meal.'
+    message += '\nМожешь ответить на это сообщение, чтобы исправить состав или вес.'
     reply_id = await show_long_reply(update, message)
     DB.set_response_message(mid, reply_id)
 
@@ -318,10 +316,10 @@ async def process_food(update: Update, *, text: str, media: bytes | None = None,
         result = await analyze(text, media=media, mime=mime, force_log=force_log)
         if result.action == 'ignore':
             if force_log:
-                await update.effective_message.reply_text('I could not recognize a meal. Describe the food and quantities.')
+                await update.effective_message.reply_text('Не удалось распознать блюдо. Опиши еду и примерный вес.')
             return
         if result.action == 'question':
-            await show_long_reply(update, breakdown(ingredients(result), result.title or 'Food', heading='Calculation only') + '\nNot saved.' if result.items else 'Please specify food ingredients and their gram weights; I cannot estimate nutrition without references.')
+            await show_long_reply(update, breakdown(ingredients(result), result.title or 'Food', heading='Только расчёт') + '\nНе записано.' if result.items else 'Please specify food ingredients and their gram weights; I cannot estimate nutrition without references.')
             return
         await save_and_confirm(update, result, text, source_kind)
     except MissingReferences as exc:
@@ -330,13 +328,13 @@ async def process_food(update: Update, *, text: str, media: bytes | None = None,
         await show_long_reply(update, missing_answer(exc))
     except Exception:
         logger.exception('Nutrition analysis failed')
-        await update.effective_message.reply_text('Food analysis failed. Check the Gemini API key, quota and logs; try again.')
+        await update.effective_message.reply_text('Не удалось обработать еду. Проверь Gemini и логи Railway, попробуй ещё раз.')
 
 
 async def log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ' '.join(context.args).strip()
     if not text:
-        await update.effective_message.reply_text('Usage: /log 200g cooked rice, 150g chicken, 10g oil')
+        await update.effective_message.reply_text('Например: /log 200 г риса, 150 г курицы, 10 г масла. Но можно написать просто сообщением.')
         return
     await process_food(update, text=text, force_log=True)
 
@@ -346,37 +344,37 @@ async def estimate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = ' '.join(context.args).strip()
     if not text:
-        await update.effective_message.reply_text('Usage: /estimate 200g chicken, 100g rice')
+        await update.effective_message.reply_text('Например: /estimate 200 г курицы и 100 г риса.')
         return
     try:
         result = await analyze('Calculate without logging: ' + text)
         if result.items:
-            message = breakdown(ingredients(result), result.title or 'Recipe', heading='Calculation only')
+            message = breakdown(ingredients(result), result.title or 'Recipe', heading='Только расчёт')
         else:
-            message = 'No verifiable ingredient weights were found; please specify them.'
-        await show_long_reply(update, message + '\nNot saved.')
+            message = 'Не получилось определить состав или вес. Уточни, пожалуйста.'
+        await show_long_reply(update, message + '\nНе записано.')
     except MissingReferences as exc:
         await show_long_reply(update, missing_answer(exc))
     except Exception:
         logger.exception('Calculation failed')
-        await update.effective_message.reply_text('Cannot calculate: check Sheet/Gemini connection.')
+        await update.effective_message.reply_text('Не получилось рассчитать. Проверь Google Sheets и Gemini.')
 
 async def revise_meal(update: Update, meal: dict | None, correction: str):
     if not await demand_owner(update):
         return
     if not meal:
-        await update.effective_message.reply_text('Meal not found. Use /mine for meal IDs.')
+        await update.effective_message.reply_text('Не нашла блюдо. Посмотри номер в /mine.')
         return
     if meal['telegram_user_id'] != update.effective_user.id:
-        await update.effective_message.reply_text('Only the person who logged a meal may correct it.')
+        await update.effective_message.reply_text('Исправлять запись может только тот, кто её добавил.')
         return
     if not correction:
-        await update.effective_message.reply_text('Describe correction, e.g. /editlast rice was 150g, not 250g.')
+        await update.effective_message.reply_text('Напиши, что изменилось, например «в рисе было 150 г, а не 250».')
         return
     try:
         result = await analyze(correction, correction=meal, force_log=True)
         if not result.items:
-            await update.effective_message.reply_text('Cannot identify corrected food and weight.')
+            await update.effective_message.reply_text('Не поняла исправление. Уточни продукт и вес.')
             return
         DB.update_meal(ALLOWED_CHAT_ID, update.effective_user.id, meal['id'],
                        result.title or meal['title'], meal['source_text'] + '\nCorrection: ' + correction,
@@ -389,7 +387,7 @@ async def revise_meal(update: Update, meal: dict | None, correction: str):
         await show_long_reply(update, missing_answer(exc))
     except Exception:
         logger.exception('Correction failed')
-        await update.effective_message.reply_text('Could not update meal. Check Google Sheets/Gemini.')
+        await update.effective_message.reply_text('Не удалось исправить блюдо. Проверь Google Sheets и Gemini.')
 
 async def editlast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await demand_owner(update):
@@ -411,7 +409,7 @@ async def undo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     last = DB.last(ALLOWED_CHAT_ID, update.effective_user.id)
     if not last:
-        await update.effective_message.reply_text('Nothing to undo.')
+        await update.effective_message.reply_text('Нет записи, которую можно удалить.')
         return
     DB.remove(ALLOWED_CHAT_ID, update.effective_user.id, last['id'])
     await sync_past(last['day'])
@@ -429,18 +427,18 @@ async def copy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not (0 < factor <= 10):
             raise ValueError()
     except (ValueError, IndexError):
-        await update.effective_message.reply_text('Usage: /copy 12 0.75')
+        await update.effective_message.reply_text('Например /copy 12 0.75 — скопировать 75% блюда №12.')
         return
     source = DB.by_id(ALLOWED_CHAT_ID, mid)
     if not source:
-        await update.effective_message.reply_text('Meal not found. Your partner can find it using /mine.')
+        await update.effective_message.reply_text('Не нашла блюдо. Его номер можно посмотреть в /mine.')
         return
     items = json.loads(source['ingredients_json'])
     nutrients = ('kcal','protein','fat','carbs')
     if any(not all(item.get(k) is not None for k in
                    ('reference','portion_g',*(f'per100_{n}' for n in nutrients)))
            for item in items):
-        await update.effective_message.reply_text('This older entry lacks ingredient reference details; please log your portion afresh.')
+        await update.effective_message.reply_text('Старая запись не содержит исходных значений ингредиентов. Укажи порцию заново.')
         return
     for item in items:
         item['portion_g'] = round(item['portion_g'] * factor, 3)
@@ -458,7 +456,7 @@ async def copy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         DB.set_response_message(new_id, reply_id)
     except Exception:
         logger.exception('Copy failed')
-        await update.effective_message.reply_text('Could not copy meal. See server logs.')
+        await update.effective_message.reply_text('Не удалось скопировать блюдо. Проверь логи Railway.')
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await demand_owner(update):
@@ -474,7 +472,7 @@ async def require_sheet(update: Update) -> bool:
     if not await demand_owner(update):
         return False
     if not SHEETS:
-        await update.effective_message.reply_text('Google Sheets not configured yet. Set GOOGLE_SHEET_ID and the service-account credentials on Railway.')
+        await update.effective_message.reply_text('Google Sheets пока не подключён. Проверь настройки доступа в Railway.')
         return False
     return True
 
@@ -561,14 +559,14 @@ async def ingredient_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         found = build_lookup(await asyncio.to_thread(SHEETS.ingredients)).get(normalize_name(query))
         if not found:
-            await update.effective_message.reply_text(f'No saved entry for "{query}". Use /ingredients or /ingredientadd.')
+            await update.effective_message.reply_text(f'Не нашла продукт: "{query}". Напиши «добавь в базу…», чтобы внести новый продукт.')
             return
         await update.effective_message.reply_text(
             f'{found.name} (per 100g): {found.kcal:g} kcal | P {found.protein:g}g | '
             f'F {found.fat:g}g | C {found.carbs:g}g.\nAliases: {", ".join(found.aliases) or "none"}')
     except Exception:
         logger.exception('Ingredient lookup failed')
-        await update.effective_message.reply_text('Could not read Google Sheets right now. Please check /sheetstatus.')
+        await update.effective_message.reply_text('Пока не удаётся прочитать Google Sheets. Проверь /sheetstatus.')
 
 
 async def ingredients_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -576,14 +574,14 @@ async def ingredients_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         foods = await asyncio.to_thread(SHEETS.ingredients)
-        lines = [f'Google Sheet ingredients ({len(foods)}):']
+        lines = [f'Ингредиентов в Google Sheet ({len(foods)}):']
         lines.extend(f'- {x.name} ({x.kcal:g} kcal/100g)' for x in foods[:70])
         if len(foods) > 70:
-            lines.append(f'...and {len(foods)-70} more. Search with /ingredient NAME.')
+            lines.append(f'...and {len(foods)-70} more. Найди нужный командой /ingredient NAME.')
         await update.effective_message.reply_text('\n'.join(lines)[:3900])
     except Exception:
         logger.exception('Ingredients list failed')
-        await update.effective_message.reply_text('Could not read Google Sheets. Please check /sheetstatus.')
+        await update.effective_message.reply_text('Не удалось прочитать Google Sheets. Проверь /sheetstatus.')
 
 
 async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -599,10 +597,10 @@ async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             today = now_local().date()
             days = [(today - timedelta(days=1)).isoformat(), today.isoformat()]
         total = sum([await sync_day(day) for day in days])
-        await update.effective_message.reply_text(f'Google Sheet updated: {", ".join(days)} ({total} person/day rows). Running this again updates existing rows, not duplicates.')
+        await update.effective_message.reply_text(f'Google Sheet обновлён: {", ".join(days)} ({total} person/day rows). Повторный запуск обновит строки без дубликатов.')
     except Exception as exc:
         logger.exception('Manual Google Sheets sync failed')
-        await update.effective_message.reply_text(f'Sync failed: {str(exc)[:450]}')
+        await update.effective_message.reply_text(f'Не удалось синхронизировать: {str(exc)[:450]}')
 
 
 async def sheetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -611,11 +609,11 @@ async def sheetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         items = await asyncio.to_thread(SHEETS.ingredients)
         await update.effective_message.reply_text(
-            f'Connected to Google Sheet: {len(items)} saved ingredients.\n'
-            f'Ingredient tabs: База продуктов, База ингредиентов, Ingredients base\nDaily results tab: {SHEETS.daily_tab}\n'
-            'Nightly export: 00:05 Europe/Copenhagen (previous day).')
+            f'Google Sheet подключён. Продуктов: {len(items)} saved ingredients.\n'
+            f'Листы продуктов: База продуктов, База ингредиентов, Ingredients base\nЛист ежедневных итогов: {SHEETS.daily_tab}\n'
+            'Автоматический экспорт: 00:05 Europe/Copenhagen (previous day).')
     except Exception as exc:
-        await update.effective_message.reply_text(f'Google Sheet connection failed: {str(exc)[:450]}')
+        await update.effective_message.reply_text(f'Нет подключения к Google Sheet: {str(exc)[:450]}')
 
 
 async def normal_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -642,7 +640,7 @@ async def normal_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message.voice:
             source_kind = 'voice'
             if message.voice.file_size and message.voice.file_size > 12_000_000:
-                await message.reply_text('Voice message is too large (12 MB limit).')
+                await message.reply_text('Голосовое сообщение слишком большое (больше 12 МБ).')
                 return
             telegram_file = await message.voice.get_file()
             mime = 'audio/ogg'  # Telegram voice notes are normally OGG/Opus.
@@ -661,11 +659,11 @@ async def normal_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await telegram_file.download_to_memory(out=output)
             media = output.getvalue()
             if len(media) > 12_000_000:
-                await message.reply_text('Media is too large (12 MB limit).')
+                await message.reply_text('Файл слишком большой (больше 12 МБ).')
                 return
     except Exception:
         logger.exception('Failed to download Telegram media')
-        await message.reply_text('Could not download this media from Telegram. Try again.')
+        await message.reply_text('Не удалось загрузить файл из Telegram. Попробуй ещё раз.')
         return
     if not text and media is None:
         return
