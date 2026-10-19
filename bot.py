@@ -62,7 +62,7 @@ Commands:
 /help — this message
 
 Tip: reply directly to the bot's meal confirmation with a correction.
-Russian & English supported. No estimated macro values. Missing references/weights block logging.
+Russian & English supported. Sheet values first; cited USDA averages for basic foods.\nNo invented recipes or weights: uncertain mixed meals require details.
 """
 
 
