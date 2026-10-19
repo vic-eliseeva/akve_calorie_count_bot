@@ -175,26 +175,69 @@ class GoogleSheets:
                     raise SheetsError(f'Tab "{tab}" exists with different column headers. No data was changed. Use a new tab name or adapt the mapping.')
 
     def ingredients(self) -> list[Ingredient]:
-        rows = self.values(self.ingredients_tab)
-        if rows and rows[0][:len(INGREDIENT_HEADERS)] != INGREDIENT_HEADERS:
+        """Merge ingredient sources read-only, preferring Telegram-owned overrides.
+
+        Existing workbook tabs keep their original columns, values, order and formulas.
+        Rows without complete numeric macros (e.g. placeholder lunch recipes and
+        Danish/Russian translation notes) are retained in the Sheet but not estimated.
+        """
+        references = []
+        seen_names = set()
+        seen_aliases = set()
+
+        def add(food: Ingredient):
+            validate_ingredient(food)
+            canonical = normalize_name(food.name)
+            if canonical in seen_names or canonical in seen_aliases:
+                return
+            # Preserve the first, highest-priority value for overlapping names.
+            aliases = tuple(a for a in food.aliases
+                            if normalize_name(a) not in seen_names
+                            and normalize_name(a) not in seen_aliases
+                            and normalize_name(a) != canonical)
+            food = Ingredient(food.name, aliases, food.kcal, food.protein,
+                              food.fat, food.carbs, food.notes,
+                              food.updated_at, food.updated_by)
+            references.append(food)
+            seen_names.add(canonical)
+            seen_aliases.update(normalize_name(a) for a in aliases)
+
+        bot_rows = self.values(self.ingredients_tab)
+        if bot_rows and bot_rows[0][:len(INGREDIENT_HEADERS)] != INGREDIENT_HEADERS:
             raise SheetsError(f'Unexpected headers on {self.ingredients_tab}; expected Bot Ingredients format.')
-        foods = []
-        for idx, row in enumerate(rows[1:], 2):
-            if not row or not str(row[0]).strip():
-                continue
-            try:
-                food = Ingredient.from_row(row)
-                validate_ingredient(food)
-                foods.append(food)
-            except (ValueError, IndexError) as exc:
-                raise SheetsError(f'Ingredient row {idx}: {exc}') from exc
-        build_lookup(foods)
-        return foods
+        for idx, row in enumerate(bot_rows[1:], 2):
+            if row and str(row[0]).strip():
+                try:
+                    add(Ingredient.from_row(row))
+                except (ValueError, IndexError) as exc:
+                    raise SheetsError(f'Bot Ingredients row {idx}: {exc}') from exc
+
+        for tab in ('База продуктов', 'База ингредиентов', 'Ingredients base'):
+            if tab not in self.tabs():
+                raise SheetsError(f'Required ingredient tab missing: {tab}')
+            rows = self.values(tab)
+            for idx, row in enumerate(rows[1:], 2):
+                if len(row) < 6 or not str(row[1]).strip():
+                    continue
+                try:
+                    kcal, protein, fat, carbs = [float(str(x).replace(',', '.')) for x in row[2:6]]
+                except (TypeError, ValueError):
+                    continue  # Non-nutrition notes/placeholders retain their exact source data.
+                name = str(row[1]).strip()
+                # Custom products sometimes list synonyms separated by commas.
+                variants = [part.strip() for part in name.split(',') if part.strip()] if tab == 'База продуктов' else [name]
+                if not variants:
+                    continue
+                add(Ingredient(variants[0], tuple(variants[1:]), kcal, protein, fat, carbs,
+                               notes=str(row[0]) if row[0] is not None else ''))
+        return references
 
     def upsert_ingredient(self, item: Ingredient) -> str:
         validate_ingredient(item)
         rows = self.values(self.ingredients_tab)
-        ingredients = self.ingredients()
+        # Only mutate the bot-owned ingredient tab, never the three source tabs.
+        ingredients = [Ingredient.from_row(row) for row in rows[1:]
+                       if row and str(row[0]).strip()]
         original_keys = {normalize_name(i.name): i for i in ingredients}
         original = original_keys.get(normalize_name(item.name))
         combined = [i for i in ingredients if normalize_name(i.name) != normalize_name(item.name)] + [item]
