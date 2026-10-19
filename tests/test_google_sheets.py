@@ -68,6 +68,17 @@ class GoogleSheetsTests(unittest.TestCase):
         self.fake = FakeGoogleSheetsAPI()
         self.gs = GoogleSheets('fake_google_sheet_id_123456789', transport=self.fake)
         self.gs.ensure_tabs()
+        self.fake.tabs['Ingredients base'] = [
+            ['Product type','Product','Calories (kcal)','Protein (g)','Fat (g)','Carbs (g)'],
+            ['Bread','Bagel',289,11,1.7,56]]
+        self.fake.tabs['База ингредиентов'] = [
+            ['Тип продукта','Продукт','Калории (ккал)','Белки (г)','Жиры (г)','Углеводы (г)'],
+            ['Хлеб','Бублик',289,11,1.7,56]]
+        self.fake.tabs['База продуктов'] = [
+            ['Комментарии','Название','Калории (ккал)','Белки (г)','Жиры (г)','Углеводы (г)','Клетчатка (г)','Проверка'],
+            ['Натурель','Скир, Скюр обычный',57,10,0.2,3.5,'','=formula'],
+            ['', 'Skip incomplete reference', '', '', '', '', '', '']]
+
 
     def test_existing_tab_is_preserved(self):
         self.assertEqual(self.fake.tabs['Our existing budget'], [['This is our unrelated tab'], ['Do not change']])
@@ -84,10 +95,12 @@ class GoogleSheetsTests(unittest.TestCase):
         self.assertEqual(build_lookup(references)[normalize_name('cottage cheese 1.5%')].kcal, 73)
         self.assertEqual(build_lookup(references)[normalize_name('ТВОРОГ 1,5%')].kcal, 73)
         self.assertEqual(self.gs.upsert_ingredient(Ingredient('Творог 1.5%', ing.aliases, 75, 13, 1.5, 2.7)), 'updated')
-        self.assertEqual(len(self.gs.ingredients()), 1)
+        self.assertEqual(len(self.gs.ingredients()), 4)
         self.assertEqual(self.gs.ingredients()[0].kcal, 75)
         with self.assertRaises(ValueError):
             self.gs.upsert_ingredient(Ingredient('Different', ('cottage cheese 1.5%',), 80, 12, 3, 2))
+        self.assertEqual(build_lookup(self.gs.ingredients())['скюр обычный'].kcal, 57)
+        self.assertEqual(self.fake.tabs['База продуктов'][1][1], 'Скир, Скюр обычный')
 
     def test_actual_per_100g_math_overrides_ai_result(self):
         ref = Ingredient('Творог 1.5%', ('cottage cheese 1.5%',), 73, 12, 1.5, 2.7)
