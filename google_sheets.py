@@ -69,25 +69,39 @@ class MissingReferences(ValueError):
         super().__init__('Unknown ingredient or portion. Nothing may be logged.')
 
 
-def calculate_from_table(result, references: list[Ingredient]):
-    """Never use AI's macros. Reject the whole meal if any item is unverifiable."""
+def calculate_from_table(result, references: list[Ingredient], online_lookup=None):
+    """Reference-first deterministic arithmetic; accept online only from verified USDA.
+
+    The entire meal is blocked if even one ingredient/weight cannot be validated.
+    """
     lookup = build_lookup(references)
     missing, missing_weights = [], []
     for item in result.items:
+        # Always disregard any nutrient numbers supplied by a language model.
+        item.kcal = item.protein = item.fat = item.carbs = 0
         key = normalize_name(item.reference or '')
         if not key or key not in lookup:
             key = normalize_name(item.name)
         source = lookup.get(key)
-        if source is None:
-            missing.append(item.name)
-            continue
         grams = item.portion_g
         if grams is None or not math.isfinite(grams) or grams <= 0 or grams > 100000:
             missing_weights.append(item.name)
             continue
-        item.reference = source.name
-        item.name = source.name
-        item.source_tab = source.source_tab
+        if source is None and online_lookup is not None:
+            source = online_lookup(item)
+            if source is not None:
+                item.reference = source.description
+                item.name = source.name
+                item.source_tab = 'USDA FoodData Central (online estimate)'
+                item.source_url = source.url
+        if source is None:
+            missing.append(item.name)
+            continue
+        if not getattr(item, 'source_url', ''):
+            item.reference = source.name
+            item.name = source.name
+            item.source_tab = source.source_tab
+            item.source_url = ''
         for nutrient in ('kcal', 'protein', 'fat', 'carbs'):
             per100 = getattr(source, nutrient)
             setattr(item, f'per100_{nutrient}', per100)
