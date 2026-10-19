@@ -14,7 +14,7 @@ class DeploymentConfigurationTests(unittest.TestCase):
             with patch('google_sheets.GoogleSheets') as client:
                 sheets_from_env()
                 self.assertEqual(client.call_args.args[0], DEFAULT_SPREADSHEET_ID)
-                self.assertEqual(client.call_args.kwargs['ingredients_tab'], 'Bot Ingredients')
+                self.assertNotIn('ingredients_tab', client.call_args.kwargs)
                 self.assertEqual(client.call_args.kwargs['daily_tab'], 'Bot Daily Totals')
 
     def test_dockerfile_includes_google_sheets(self):
