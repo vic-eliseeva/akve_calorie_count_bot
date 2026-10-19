@@ -68,6 +68,9 @@ class GoogleSheetsTests(unittest.TestCase):
         self.fake = FakeGoogleSheetsAPI()
         self.gs = GoogleSheets('fake_google_sheet_id_123456789', transport=self.fake)
         self.gs.ensure_tabs()
+        self.fake.tabs['Ingredients base'] = [['type','name','kcal','p','f','c'], ['Bread','Bagel',289,11,1.7,56]]
+        self.fake.tabs['База ингредиентов'] = [['тип','название','kcal','p','f','c'], ['Хлеб','Бублик',289,11,1.7,56], ['', 'Onion', '', 'Лук',40,1.1,0.1,9.3]]
+        self.fake.tabs['База продуктов'] = [['notes','name','kcal','p','f','c','fiber','check'], ['','Скир, Скюр',57,10,0.2,3.5,'','=formula']]
         self.fake.tabs['Ingredients base'] = [
             ['Product type','Product','Calories (kcal)','Protein (g)','Fat (g)','Carbs (g)'],
             ['Bread','Bagel',289,11,1.7,56]]
@@ -95,7 +98,7 @@ class GoogleSheetsTests(unittest.TestCase):
         self.assertEqual(build_lookup(references)[normalize_name('cottage cheese 1.5%')].kcal, 73)
         self.assertEqual(build_lookup(references)[normalize_name('ТВОРОГ 1,5%')].kcal, 73)
         self.assertEqual(self.gs.upsert_ingredient(Ingredient('Творог 1.5%', ing.aliases, 75, 13, 1.5, 2.7)), 'updated')
-        self.assertEqual(len(self.gs.ingredients()), 4)
+        self.assertEqual(len(self.gs.ingredients()), 5)
         self.assertEqual(self.gs.ingredients()[0].kcal, 75)
         with self.assertRaises(ValueError):
             self.gs.upsert_ingredient(Ingredient('Different', ('cottage cheese 1.5%',), 80, 12, 3, 2))
