@@ -16,6 +16,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from database import FoodDB
 from nutrition import FoodResult, NutritionAI
+from ingredient_chat import has_ingredient_intent, combine, ready_ingredient, prompt_for
 from google_sheets import GoogleSheets, Ingredient, sheets_from_env, build_lookup, normalize_name, calculate_from_table, MissingReferences
 from usda import USDAFoodLookup
 
@@ -464,33 +465,77 @@ async def require_sheet(update: Update) -> bool:
     return True
 
 
+async def handle_ingredient_chat(update: Update, text: str, *, force: bool = False) -> bool:
+    """Handle explicit free-form additions or a user's pending clarification."""
+    if not await demand_owner(update):
+        return True
+    user_id = update.effective_user.id
+    pending = DB.pending_ingredient(user_id)
+    if not (force or pending or has_ingredient_intent(text)):
+        return False
+    if text.lower().strip() in ('отмена', 'cancel', '/cancel', 'стоп'):
+        DB.clear_pending_ingredient(user_id)
+        await update.effective_message.reply_text('Хорошо, добавление продукта отменено.')
+        return True
+    try:
+        change = await asyncio.to_thread(AI.parse_ingredient_change, text, pending)
+        if change.action == 'ignore' and not force:
+            return False  # A regular meal sent while an addition is pending.
+        if change.action == 'ignore' and force:
+            await update.effective_message.reply_text(
+                'Напиши название и КБЖУ обычным текстом. Например: '
+                '«Добавь в базу творог 1,5%, на 100 г: 73 ккал, '
+                'белки 12, жиры 1,5, углеводы 2,7».')
+            return True
+        data = combine(pending, change)
+        try:
+            kind, item = ready_ingredient(data)
+        except ValueError as exc:
+            if str(exc).startswith('Не хватает:'):
+                DB.save_pending_ingredient(user_id, data)
+                await update.effective_message.reply_text(prompt_for(data))
+                return True
+            raise
+        if not SHEETS:
+            await update.effective_message.reply_text('Сначала подключи Google Sheets в Railway.')
+            return True
+        tab = await asyncio.to_thread(SHEETS.add_ingredient, kind, item)
+        DB.clear_pending_ingredient(user_id)
+        await update.effective_message.reply_text(
+            f'Готово, добавила «{item.name}» в лист «{tab}».\n'
+            f'На 100 г: {fmt(item.kcal)} ккал · Б {fmt(item.protein)} г · '
+            f'Ж {fmt(item.fat)} г · У {fmt(item.carbs)} г.\n'
+            'Можешь отправить блюдо ещё раз — теперь я использую эти значения.')
+        return True
+    except Exception as exc:
+        logger.exception('Conversational ingredient addition failed')
+        await update.effective_message.reply_text(
+            'Не удалось добавить продукт: ' + str(exc)[:280] +
+            '\nПроверь данные или напиши «отмена», чтобы начать заново.')
+        return True
+
+
 async def ingredientadd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_sheet(update):
+    if not await demand_owner(update):
         return
     raw = (update.effective_message.text or '').partition(' ')[2].strip()
-    fields = [f.strip() for f in raw.split('|')]
-    if len(fields) != 6 or fields[0].lower() not in ('ru','en','custom'):
-        await update.effective_message.reply_text(
-            'Provide source and values PER 100g: kcal | protein | fat | carbs\n'
-            '/ingredientadd ru | Творог 1.5% | 73 | 12 | 1.5 | 2.7\n'
-            '/ingredientadd en | Cottage cheese | 73 | 12 | 1.5 | 2.7\n'
-            '/ingredientadd custom | Скир, Скюр | 57 | 10 | 0.2 | 3.5')
-        return
-    try:
-        kind = fields[0].lower()
-        values = [float(v.replace(',', '.')) for v in fields[2:6]]
-        names = [x.strip() for x in fields[1].split(',') if x.strip()] if kind == 'custom' else [fields[1]]
-        if not names:
-            raise ValueError('Missing ingredient name')
-        item = Ingredient(names[0], tuple(names[1:]), *values)
-        tab = await asyncio.to_thread(SHEETS.add_ingredient, kind, item)
-        await update.effective_message.reply_text(
-            f'Added to {tab}.\n'
-            f'{item.name}, per 100 g: {macros({"kcal":item.kcal,"protein":item.protein,"fat":item.fat,"carbs":item.carbs})}\n'
-            'Resend your meal for recalculation using this reference.')
-    except Exception as exc:
-        logger.warning('Ingredient addition rejected: %s', exc)
-        await update.effective_message.reply_text(f'Not saved: {str(exc)[:450]}')
+    # Preserve the old structured command for people who already use it.
+    parts = [p.strip() for p in raw.split('|')]
+    if len(parts) == 6 and parts[0].lower() in ('ru', 'en', 'custom'):
+        try:
+            kind = parts[0].lower()
+            numbers = [float(x.replace(',', '.')) for x in parts[2:]]
+            names = [x.strip() for x in parts[1].split(',') if x.strip()] if kind == 'custom' else [parts[1]]
+            item = Ingredient(names[0], tuple(names[1:]), *numbers)
+            tab = await asyncio.to_thread(SHEETS.add_ingredient, kind, item)
+            DB.clear_pending_ingredient(update.effective_user.id)
+            await update.effective_message.reply_text(f'Добавила «{item.name}» в лист «{tab}».')
+            return
+        except Exception as exc:
+            await update.effective_message.reply_text('Не смогла сохранить: ' + str(exc)[:300])
+            return
+    await handle_ingredient_chat(update, raw, force=True)
+
 
 async def ingredient_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_sheet(update):
