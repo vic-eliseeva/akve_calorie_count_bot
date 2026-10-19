@@ -5,6 +5,7 @@ The service account only touches the two configured tabs. Other tabs are left al
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import unicodedata
@@ -12,7 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-INGREDIENT_HEADERS = ["Ingredient", "Aliases", "kcal_per_100g", "protein_per_100g", "fat_per_100g", "carbs_per_100g", "Notes", "Updated_at", "Updated_by"]
+SOURCE_TABS = ('База продуктов', 'База ингредиентов', 'Ingredients base')
+TAB_FOR_KIND = {'custom':'База продуктов', 'ru':'База ингредиентов', 'en':'Ingredients base'}
 DEFAULT_SPREADSHEET_ID = '1w6s6N5IpNHtuYUHBT6QO3PJ2ZDsLVysq4iHIQXLZg1A'  # Existing AKVE calorie count master (not a secret)
 DAILY_HEADERS = ["Date", "Telegram_user_id", "Name", "kcal", "protein_g", "fat_g", "carbs_g", "Meals_count", "Last_synced"]
 
@@ -37,61 +39,63 @@ class Ingredient:
     fat: float
     carbs: float
     notes: str = ''
-    updated_at: str = ''
-    updated_by: str = ''
-
-    @classmethod
-    def from_row(cls, row: list) -> 'Ingredient':
-        cells = [str(x) for x in row] + [''] * max(0, 9-len(row))
-        if not cells[0].strip():
-            raise ValueError('Ingredient has no name')
-        return cls(
-            name=cells[0].strip(), aliases=tuple(a.strip() for a in cells[1].split('|') if a.strip()),
-            kcal=float(cells[2]), protein=float(cells[3]), fat=float(cells[4]), carbs=float(cells[5]),
-            notes=cells[6], updated_at=cells[7], updated_by=cells[8],
-        )
-
-    def to_row(self) -> list:
-        return [self.name, ' | '.join(self.aliases), self.kcal, self.protein, self.fat,
-                self.carbs, self.notes, self.updated_at, self.updated_by]
+    source_tab: str = ''
 
 
-def validate_ingredient(item: Ingredient) -> None:
-    if not item.name.strip() or len(item.name) > 120:
-        raise ValueError('Ingredient name must be between 1 and 120 characters.')
-    for x, limit in [('kcal', 1000), ('protein', 100), ('fat', 100), ('carbs', 100)]:
-        v = getattr(item, x)
-        if not 0 <= v <= limit:
-            raise ValueError(f'{x} must be between 0 and {limit} per 100 g.')
-    if len(item.aliases) > 20:
-        raise ValueError('Up to 20 aliases are supported.')
+def validate_ingredient(item: Ingredient):
+    if not item.name.strip() or len(item.name) > 200:
+        raise ValueError('Ingredient name must have 1–200 characters.')
+    for nutrient, upper in [('kcal', 1000), ('protein', 100), ('fat', 100), ('carbs', 100)]:
+        v = getattr(item, nutrient)
+        if not math.isfinite(v) or not 0 <= v <= upper:
+            raise ValueError(f'{nutrient} must be finite and between 0 and {upper} per 100g.')
 
 
-def build_lookup(ingredients: list[Ingredient]) -> dict[str, Ingredient]:
-    lookup: dict[str, Ingredient] = {}
-    for ing in ingredients:
-        for key in (ing.name, *ing.aliases):
-            norm = normalize_name(key)
-            if norm in lookup and normalize_name(lookup[norm].name) != normalize_name(ing.name):
-                raise ValueError(f'Ingredient alias collision: {key} is mapped to multiple foods.')
-            lookup[norm] = ing
+def build_lookup(items: list[Ingredient]) -> dict[str, Ingredient]:
+    """First tab takes priority; aliases never override canonical names."""
+    lookup = {}
+    for food in items:
+        lookup.setdefault(normalize_name(food.name), food)
+    for food in items:
+        for alias in food.aliases:
+            lookup.setdefault(normalize_name(alias), food)
     return lookup
 
 
-def apply_reference_macros(result, references: list[Ingredient]) -> None:
-    """Override AI-provided per-portion estimates only for verified reference + grams.
+class MissingReferences(ValueError):
+    def __init__(self, missing: list[str], missing_weights: list[str] | None = None):
+        self.missing = list(dict.fromkeys(missing))
+        self.missing_weights = list(dict.fromkeys(missing_weights or []))
+        super().__init__('Unknown ingredient or portion. Nothing may be logged.')
 
-    This is deterministic, leaving unknown or unweighed ingredients estimated by AI.
-    """
+
+def calculate_from_table(result, references: list[Ingredient]):
+    """Never use AI's macros. Reject the whole meal if any item is unverifiable."""
     lookup = build_lookup(references)
+    missing, missing_weights = [], []
     for item in result.items:
         key = normalize_name(item.reference or '')
+        if not key or key not in lookup:
+            key = normalize_name(item.name)
+        source = lookup.get(key)
+        if source is None:
+            missing.append(item.name)
+            continue
         grams = item.portion_g
-        if key and grams is not None and key in lookup and 0 < grams <= 100000:
-            source = lookup[key]
-            for nutrient in ('kcal', 'protein', 'fat', 'carbs'):
-                setattr(item, nutrient, round(getattr(source, nutrient) * grams / 100.0, 2))
-
+        if grams is None or not math.isfinite(grams) or grams <= 0 or grams > 100000:
+            missing_weights.append(item.name)
+            continue
+        item.reference = source.name
+        item.name = source.name
+        item.source_tab = source.source_tab
+        for nutrient in ('kcal', 'protein', 'fat', 'carbs'):
+            per100 = getattr(source, nutrient)
+            setattr(item, f'per100_{nutrient}', per100)
+            setattr(item, nutrient, round(per100 * grams / 100.0, 2))
+    if missing or missing_weights or not result.items:
+        if not result.items:
+            missing.append('No identifiable ingredient')
+        raise MissingReferences(missing, missing_weights)
 
 class SheetsError(RuntimeError):
     pass
@@ -104,16 +108,12 @@ class GoogleSheets:
     """
     BASE = 'https://sheets.googleapis.com/v4/spreadsheets'
 
-    def __init__(self, spreadsheet_id: str, *, ingredients_tab: str = 'Bot Ingredients',
-                 daily_tab: str = 'Bot Daily Totals', credentials_json: str = '',
+    def __init__(self, spreadsheet_id: str, *, daily_tab: str = 'Bot Daily Totals', credentials_json: str = '',
                  credentials_file: str = '', transport=None):
         if not re.fullmatch(r'[a-zA-Z0-9_-]{12,}', spreadsheet_id):
             raise ValueError('GOOGLE_SHEET_ID must be the spreadsheet ID from its URL.')
         self.id = spreadsheet_id
-        self.ingredients_tab = ingredients_tab
         self.daily_tab = daily_tab
-        if ingredients_tab == daily_tab:
-            raise ValueError('Google Sheets tab names must be different.')
         if transport is not None:
             self.session = transport
         else:
@@ -151,112 +151,83 @@ class GoogleSheets:
 
     def put(self, tab: str, row: int, values: list) -> None:
         from urllib.parse import quote
-        range_ = quote(sheet_range(tab, f'A{row}:I{row}'), safe='')
+        last_col = chr(ord('A') + len(values) - 1)
+        range_ = quote(sheet_range(tab, f'A{row}:{last_col}{row}'), safe='')
         self._request('PUT', '/values/' + range_, params={'valueInputOption': 'RAW'}, data={'values': [values]})
 
     def append(self, tab: str, values: list) -> None:
         from urllib.parse import quote
-        range_ = quote(sheet_range(tab, 'A:I'), safe='')
+        last_col = chr(ord('A') + len(values) - 1)
+        range_ = quote(sheet_range(tab, 'A:' + last_col), safe='')
         self._request('POST', '/values/' + range_ + ':append',
                       params={'valueInputOption': 'RAW', 'insertDataOption': 'INSERT_ROWS'},
                       data={'values': [values]})
 
     def ensure_tabs(self) -> None:
-        existing = set(self.tabs())
-        for tab, headers in [(self.ingredients_tab, INGREDIENT_HEADERS), (self.daily_tab, DAILY_HEADERS)]:
-            if tab not in existing:
-                self._request('POST', ':batchUpdate', data={'requests': [{'addSheet': {'properties': {'title': tab}}}]})
-                self.put(tab, 1, headers)
-            else:
-                rows = self.values(tab)
-                if not rows:
-                    self.put(tab, 1, headers)
-                elif rows[0][:len(headers)] != headers:
-                    raise SheetsError(f'Tab "{tab}" exists with different column headers. No data was changed. Use a new tab name or adapt the mapping.')
+        found = set(self.tabs())
+        missing = [tab for tab in (*SOURCE_TABS, self.daily_tab) if tab not in found]
+        if missing:
+            raise SheetsError('Required Google Sheet tabs missing: ' + ', '.join(missing))
+        for tab in SOURCE_TABS:
+            rows = self.values(tab)
+            if not rows or len(rows[0]) < 6:
+                raise SheetsError('Ingredient tab has wrong structure: ' + tab)
+        daily = self.values(self.daily_tab)
+        if not daily or daily[0][:len(DAILY_HEADERS)] != DAILY_HEADERS:
+            raise SheetsError('Daily summary tab has unexpected headers; nothing changed.')
 
     def ingredients(self) -> list[Ingredient]:
-        """Merge ingredient sources read-only, preferring Telegram-owned overrides.
-
-        Existing workbook tabs keep their original columns, values, order and formulas.
-        Rows without complete numeric macros (e.g. placeholder lunch recipes and
-        Danish/Russian translation notes) are retained in the Sheet but not estimated.
-        """
-        references = []
-        seen_names = set()
-        seen_aliases = set()
-
-        def add(food: Ingredient):
-            validate_ingredient(food)
-            canonical = normalize_name(food.name)
-            if canonical in seen_names or canonical in seen_aliases:
-                return
-            # Preserve the first, highest-priority value for overlapping names.
-            aliases = tuple(a for a in food.aliases
-                            if normalize_name(a) not in seen_names
-                            and normalize_name(a) not in seen_aliases
-                            and normalize_name(a) != canonical)
-            food = Ingredient(food.name, aliases, food.kcal, food.protein,
-                              food.fat, food.carbs, food.notes,
-                              food.updated_at, food.updated_by)
-            references.append(food)
-            seen_names.add(canonical)
-            seen_aliases.update(normalize_name(a) for a in aliases)
-
-        bot_rows = self.values(self.ingredients_tab)
-        if bot_rows and bot_rows[0][:len(INGREDIENT_HEADERS)] != INGREDIENT_HEADERS:
-            raise SheetsError(f'Unexpected headers on {self.ingredients_tab}; expected Bot Ingredients format.')
-        for idx, row in enumerate(bot_rows[1:], 2):
-            if row and str(row[0]).strip():
-                try:
-                    add(Ingredient.from_row(row))
-                except (ValueError, IndexError) as exc:
-                    raise SheetsError(f'Bot Ingredients row {idx}: {exc}') from exc
-
-        for tab in ('База продуктов', 'База ингредиентов', 'Ingredients base'):
-            if tab not in self.tabs():
-                raise SheetsError(f'Required ingredient tab missing: {tab}')
-            rows = self.values(tab)
-            for idx, row in enumerate(rows[1:], 2):
-                if len(row) < 6 or not str(row[1]).strip():
+        if any(tab not in self.tabs() for tab in SOURCE_TABS):
+            raise SheetsError('Missing one or more source ingredient tabs.')
+        foods = []
+        for tab in SOURCE_TABS:
+            for row in self.values(tab)[1:]:
+                if len(row) < 6 or row[1] is None or not str(row[1]).strip():
                     continue
                 name = str(row[1]).strip()
-                nutrients = row[2:6]
-                aliases_from_translation = ()
-                # The lower part of the Russian sheet has Danish in B, Russian in D,
-                # and kcal/P/F/C in E:H instead of C:F. Keep the source untouched.
-                if tab == 'База ингредиентов' and len(row) >= 8 and not str(row[2] if row[2] is not None else '').strip():
+                vals = row[2:6]
+                aliases = []
+                if tab == 'База ингредиентов' and len(row) >= 8 and not str(row[2] or '').strip():
+                    vals = row[4:8]
                     if row[3] is not None and str(row[3]).strip():
-                        aliases_from_translation = (str(row[3]).strip(),)
-                    nutrients = row[4:8]
+                        aliases = [str(row[3]).strip()]
                 try:
-                    kcal, protein, fat, carbs = [float(str(x).replace(',', '.')) for x in nutrients]
-                except (TypeError, ValueError):
-                    continue  # Incomplete recipes/translations retain exact source values.
-                # Custom products sometimes list synonyms separated by commas.
-                variants = [part.strip() for part in name.split(',') if part.strip()] if tab == 'База продуктов' else [name]
-                if not variants:
+                    per100 = [float(str(x).replace(',', '.')) for x in vals]
+                except (ValueError, TypeError):
                     continue
-                add(Ingredient(variants[0], tuple(variants[1:]) + aliases_from_translation, kcal, protein, fat, carbs,
-                               notes=str(row[0]) if row[0] is not None else ''))
-        return references
+                if tab == 'База продуктов':
+                    names = [x.strip() for x in name.split(',') if x.strip()]
+                    if not names:
+                        continue
+                    name, aliases = names[0], names[1:]
+                item = Ingredient(name, tuple(aliases), *per100,
+                                  notes=str(row[0]) if row[0] is not None else '', source_tab=tab)
+                try:
+                    validate_ingredient(item)
+                except ValueError:
+                    continue
+                foods.append(item)
+        return foods
 
-    def upsert_ingredient(self, item: Ingredient) -> str:
+    def add_ingredient(self, kind: str, item: Ingredient) -> str:
+        """Append provided values ONLY to the selected original tab."""
+        tab = TAB_FOR_KIND.get(kind.lower())
+        if tab is None:
+            raise ValueError('Choose source: ru, en or custom.')
         validate_ingredient(item)
-        rows = self.values(self.ingredients_tab)
-        # Only mutate the bot-owned ingredient tab, never the three source tabs.
-        ingredients = [Ingredient.from_row(row) for row in rows[1:]
-                       if row and str(row[0]).strip()]
-        original_keys = {normalize_name(i.name): i for i in ingredients}
-        original = original_keys.get(normalize_name(item.name))
-        combined = [i for i in ingredients if normalize_name(i.name) != normalize_name(item.name)] + [item]
-        build_lookup(combined)  # Reject collisions before writing.
-        if original:
-            for row_num, row in enumerate(rows[1:], 2):
-                if row and normalize_name(str(row[0])) == normalize_name(item.name):
-                    self.put(self.ingredients_tab, row_num, item.to_row())
-                    return 'updated'
-        self.append(self.ingredients_tab, item.to_row())
-        return 'added'
+        existing = build_lookup(self.ingredients())
+        for alias in (item.name, *item.aliases):
+            if normalize_name(alias) in existing:
+                raise ValueError(f'Already in Google Sheet: {alias}. Edit the source row directly to correct values.')
+        if kind.lower() == 'custom':
+            names = ', '.join([item.name, *item.aliases])
+            values = ['', names, item.kcal, item.protein, item.fat, item.carbs, '', '']
+        else:
+            if item.aliases:
+                raise ValueError('Aliases can only be added to custom products.')
+            values = ['Added from Telegram', item.name, item.kcal, item.protein, item.fat, item.carbs]
+        self.append(tab, values)
+        return tab
 
     def daily_rows(self) -> list[list]:
         rows = self.values(self.daily_tab)
@@ -291,7 +262,6 @@ def sheets_from_env() -> GoogleSheets | None:
     id_ = (os.getenv('GOOGLE_SHEET_ID') or DEFAULT_SPREADSHEET_ID).strip()
     if not id_:
         return None
-    return GoogleSheets(id_, ingredients_tab=os.getenv('GOOGLE_INGREDIENTS_TAB', 'Bot Ingredients'),
-                        daily_tab=os.getenv('GOOGLE_DAILY_TAB', 'Bot Daily Totals'),
+    return GoogleSheets(id_, daily_tab=os.getenv('GOOGLE_DAILY_TAB', 'Bot Daily Totals'),
                         credentials_json=os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip(),
                         credentials_file=os.getenv('GOOGLE_SERVICE_ACCOUNT_FILE', '').strip())
