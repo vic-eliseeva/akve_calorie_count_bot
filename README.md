@@ -9,7 +9,7 @@
 The existing **AKVE calorie count master** Google spreadsheet contains these **original, unchanged data tables** imported from the source workbook:
 
 - `Ingredients base`: English ingredient data, columns A–F. Category A, name B, kcal/protein/fat/carbs C–F.
-- `База ингредиентов`: Russian ingredient data, columns A–F; other non-nutrition notes and translations are kept exactly as received.
+- `База ингредиентов`: Russian ingredient data, columns A–F; also contains a later Danish-name/Russian-translation section with nutritional values in E–H. Both layouts are read without editing any source cells.
 - `База продуктов`: custom product data, columns A–H. Comments A, names B, macros C–F, optional fiber G, original consistency-check formulas H.
 - `Bot Ingredients`: separate bot-maintained overrides and additions. No commands overwrite the three source tabs.
 - `Bot Daily Totals`: unchanged daily export with one row per person per day.
