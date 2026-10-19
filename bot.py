@@ -16,7 +16,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from database import FoodDB
 from nutrition import FoodResult, NutritionAI
-from google_sheets import GoogleSheets, Ingredient, sheets_from_env, build_lookup, normalize_name
+from google_sheets import GoogleSheets, Ingredient, sheets_from_env, build_lookup, normalize_name, calculate_from_table, MissingReferences
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
@@ -50,7 +50,7 @@ Commands:
 /undo — delete your latest entry
 /copy 12 0.75 — log 75% of any meal #12 as YOUR portion
 /export — CSV of both diaries, compatible with Google Sheets
-/ingredientadd name | kcal | protein | fat | carbs | aliases — save macros per 100g to Google Sheet
+/ingredientadd ru|en|custom | name | kcal | protein | fat | carbs — add supplied per-100g values to original tabs
 /ingredient name — look up a stored ingredient or alias (Russian/English)
 /ingredients — list stored ingredients
 /sync — update current and yesterday's totals in the Google Sheet
@@ -60,7 +60,7 @@ Commands:
 /help — this message
 
 Tip: reply directly to the bot's meal confirmation with a correction.
-Russian & English supported. Food photo/quantity estimates can be inaccurate.
+Russian & English supported. No estimated macro values. Missing references/weights block logging.
 """
 
 
@@ -137,7 +137,7 @@ async def goal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def fmt(n: float | int) -> str:
     v = float(n)
-    return str(int(round(v))) if abs(round(v) - v) < .05 else f'{v:.1f}'
+    return f'{v:.6f}'.rstrip('0').rstrip('.')
 
 
 def macros(t: dict) -> str:
@@ -186,14 +186,64 @@ def ingredients(result: FoodResult) -> list[dict]:
     return [item.model_dump() for item in result.items]
 
 
+def breakdown(items: list[dict], title: str, *, heading: str = 'Calculated') -> str:
+    """Show ingredient-by-ingredient arithmetic for all four nutrients."""
+    lines = [f'{heading} · {title}', 'Using ONLY your spreadsheet values per 100 g:']
+    for i, item in enumerate(items, 1):
+        grams = item['portion_g']
+        lines.append(f"\n{i}. {item['reference']} — {fmt(grams)} g ({item['source_tab']})")
+        for nutrient, label, units in [('kcal', 'Calories', 'kcal'), ('protein', 'P', 'g'),
+                                       ('fat', 'F', 'g'), ('carbs', 'C', 'g')]:
+            lines.append(f"  {label}: {fmt(item['per100_'+nutrient])} × {fmt(grams)}/100 = {fmt(item[nutrient])} {units}")
+    lines.append(f"\nTOTAL = {macros(DB.totals(items))} (sum of rows)")
+    return '\n'.join(lines)
+
+
+async def show_long_reply(update: Update, message: str):
+    """Telegram limits message size; never silently truncate calculations."""
+    chunks = []
+    while message:
+        if len(message) <= 3700:
+            chunks.append(message)
+            break
+        pos = message.rfind('\n', 0, 3700)
+        if pos < 100:
+            pos = 3700
+        chunks.append(message[:pos])
+        message = message[pos:].lstrip('\n')
+    first = None
+    for chunk in chunks:
+        sent = await update.effective_message.reply_text(chunk)
+        if first is None:
+            first = sent.message_id
+    return first
+
+
+def missing_answer(exc: MissingReferences) -> str:
+    lines = ['NOT LOGGED: no nutritional values or weights will be invented.']
+    if exc.missing:
+        lines.append('Missing ingredients in your spreadsheet: ' + ', '.join(exc.missing))
+        lines.append('Please provide their values PER 100g in kcal | protein | fat | carbs:')
+        lines.append('/ingredientadd ru | Творог 1.5% | 73 | 12 | 1.5 | 2.7')
+        lines.append('/ingredientadd en | Cottage cheese | 73 | 12 | 1.5 | 2.7')
+        lines.append('/ingredientadd custom | Скир, Скюр | 57 | 10 | 0.2 | 3.5')
+    if exc.missing_weights:
+        lines.append('Please provide the actual gram weights for: ' + ', '.join(exc.missing_weights))
+    lines.append('After adding values or specifying weights, resend the meal. No part was saved.')
+    return '\n'.join(lines)
+
+
 async def analyze(text: str, media: bytes | None = None, mime: str | None = None,
                   force_log: bool = False, correction: dict | None = None) -> FoodResult:
-    # Google Sheet is authoritative. Never silently fall back to AI guesses if it cannot be read.
-    references = await asyncio.to_thread(SHEETS.ingredients) if SHEETS else []
-    return await asyncio.to_thread(AI.interpret, text=text, media=media, mime=mime,
-                                   force_log=force_log, correction=correction,
-                                   references=references)
-
+    if SHEETS is None:
+        raise ValueError('Spreadsheet credentials missing. Cannot log nutrition without references.')
+    references = await asyncio.to_thread(SHEETS.ingredients)
+    result = await asyncio.to_thread(AI.interpret, text=text, media=media, mime=mime,
+                                     force_log=force_log, correction=correction,
+                                     references=references)
+    if result.action != 'ignore':
+        calculate_from_table(result, references)
+    return result
 
 async def sync_day(day: str) -> int:
     if not SHEETS:
@@ -223,7 +273,7 @@ async def nightly_sync(context: ContextTypes.DEFAULT_TYPE):
 
 async def save_and_confirm(update: Update, result: FoodResult, text: str, source_kind: str):
     if not result.items:
-        await update.effective_message.reply_text('I could not identify an edible portion. Please specify what and how much you ate.')
+        await update.effective_message.reply_text('Nothing saved: list ingredients and measured grams.')
         return
     stamp = now_local()
     try:
@@ -237,16 +287,10 @@ async def save_and_confirm(update: Update, result: FoodResult, text: str, source
         if 'UNIQUE constraint failed' in str(exc):
             return
         raise
-    total = DB.totals(ingredients(result))
-    response = f"Saved #{mid} · {result.title}\n{macros(total)}"
-    if result.assumptions:
-        response += f"\nAssumptions: {result.assumptions[:450]}"
-    if result.confidence == 'low':
-        response += '\nLow-confidence estimate: exact weights would help.'
-    response += '\nReply to this message to correct the meal.'
-    sent = await update.effective_message.reply_text(response[:3900])
-    DB.set_response_message(mid, sent.message_id)
-
+    message = breakdown(ingredients(result), result.title, heading=f'Saved #{mid}')
+    message += '\nReply to this confirmation to correct the meal.'
+    reply_id = await show_long_reply(update, message)
+    DB.set_response_message(mid, reply_id)
 
 async def process_food(update: Update, *, text: str, media: bytes | None = None,
                        mime: str | None = None, force_log: bool = False,
@@ -260,9 +304,11 @@ async def process_food(update: Update, *, text: str, media: bytes | None = None,
                 await update.effective_message.reply_text('I could not recognize a meal. Describe the food and quantities.')
             return
         if result.action == 'question':
-            await update.effective_message.reply_text((result.answer or 'Please specify what you ate.')[:3800])
+            await show_long_reply(update, breakdown(ingredients(result), result.title or 'Food', heading='Calculation only') + '\nNot saved.' if result.items else 'Please specify food ingredients and their gram weights; I cannot estimate nutrition without references.')
             return
         await save_and_confirm(update, result, text, source_kind)
+    except MissingReferences as exc:
+        await show_long_reply(update, missing_answer(exc))
     except Exception:
         logger.exception('Nutrition analysis failed')
         await update.effective_message.reply_text('Food analysis failed. Check the Gemini API key, quota and logs; try again.')
@@ -284,18 +330,17 @@ async def estimate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text('Usage: /estimate 200g chicken, 100g rice')
         return
     try:
-        result = await analyze('Calculate nutrition for this food without logging: ' + text)
+        result = await analyze('Calculate without logging: ' + text)
         if result.items:
-            message = f"Estimate · {result.title}\n{macros(DB.totals(ingredients(result)))}"
-            if result.assumptions:
-                message += f'\nAssumptions: {result.assumptions}'
+            message = breakdown(ingredients(result), result.title or 'Recipe', heading='Calculation only')
         else:
-            message = result.answer or 'Not enough information to estimate.'
-        await update.effective_message.reply_text(message[:3900] + '\nNot saved.')
+            message = 'No verifiable ingredient weights were found; please specify them.'
+        await show_long_reply(update, message + '\nNot saved.')
+    except MissingReferences as exc:
+        await show_long_reply(update, missing_answer(exc))
     except Exception:
-        logger.exception('Estimate failed')
-        await update.effective_message.reply_text('Could not estimate. Check Gemini settings and try again.')
-
+        logger.exception('Calculation failed')
+        await update.effective_message.reply_text('Cannot calculate: check Sheet/Gemini connection.')
 
 async def revise_meal(update: Update, meal: dict | None, correction: str):
     if not await demand_owner(update):
