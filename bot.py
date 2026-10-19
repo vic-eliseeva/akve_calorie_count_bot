@@ -17,6 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from database import FoodDB
 from nutrition import FoodResult, NutritionAI
 from google_sheets import GoogleSheets, Ingredient, sheets_from_env, build_lookup, normalize_name, calculate_from_table, MissingReferences
+from usda import USDAFoodLookup
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
@@ -30,6 +31,7 @@ TIMEZONE = ZoneInfo(os.getenv('TIMEZONE', 'Europe/Copenhagen'))
 DB = FoodDB(os.getenv('DB_PATH', './data/food.sqlite3'))
 AI: NutritionAI | None = None
 SHEETS: GoogleSheets | None = None
+ONLINE_LOOKUP = USDAFoodLookup()
 
 HELP_TEXT = """Two-person food diary / Дневник питания на двоих
 
@@ -188,10 +190,12 @@ def ingredients(result: FoodResult) -> list[dict]:
 
 def breakdown(items: list[dict], title: str, *, heading: str = 'Calculated') -> str:
     """Show ingredient-by-ingredient arithmetic for all four nutrients."""
-    lines = [f'{heading} · {title}', 'Using ONLY your spreadsheet values per 100 g:']
+    lines = [f'{heading} · {title}', 'Source: your Google Sheet first; verified USDA averages for missing basic foods:']
     for i, item in enumerate(items, 1):
         grams = item['portion_g']
         lines.append(f"\n{i}. {item['reference']} — {fmt(grams)} g ({item['source_tab']})")
+        if item.get('source_url'):
+            lines.append('  Average reference (not your own ingredient database): ' + item['source_url'])
         for nutrient, label, units in [('kcal', 'Calories', 'kcal'), ('protein', 'P', 'g'),
                                        ('fat', 'F', 'g'), ('carbs', 'C', 'g')]:
             lines.append(f"  {label}: {fmt(item['per100_'+nutrient])} × {fmt(grams)}/100 = {fmt(item[nutrient])} {units}")
@@ -220,9 +224,9 @@ async def show_long_reply(update: Update, message: str):
 
 
 def missing_answer(exc: MissingReferences) -> str:
-    lines = ['NOT LOGGED: no nutritional values or weights will be invented.']
+    lines = ['NOT LOGGED: no verified nutrition source or measured weight was available.']
     if exc.missing:
-        lines.append('Missing ingredients in your spreadsheet: ' + ', '.join(exc.missing))
+        lines.append('No safe match in your spreadsheet or USDA public reference: ' + ', '.join(exc.missing))
         lines.append('Please provide their values PER 100g in kcal | protein | fat | carbs:')
         lines.append('/ingredientadd ru | Творог 1.5% | 73 | 12 | 1.5 | 2.7')
         lines.append('/ingredientadd en | Cottage cheese | 73 | 12 | 1.5 | 2.7')
@@ -242,7 +246,7 @@ async def analyze(text: str, media: bytes | None = None, mime: str | None = None
                                      force_log=force_log, correction=correction,
                                      references=references)
     if result.action != 'ignore':
-        calculate_from_table(result, references)
+        await asyncio.to_thread(calculate_from_table, result, references, ONLINE_LOOKUP.resolve)
     return result
 
 async def sync_day(day: str) -> int:
@@ -614,7 +618,7 @@ async def set_commands(application: Application):
         BotCommand('editlast', 'Correct your latest meal'),
         BotCommand('undo', 'Remove latest meal'),
         BotCommand('copy', 'Copy a meal to your diary'),
-        BotCommand('estimate', 'Calculate verified macros without saving'),
+        BotCommand('estimate', 'Calculate using Sheet and USDA verified averages'),
         BotCommand('export', 'Export shared diary to CSV'),
         BotCommand('ingredientadd', 'Add per-100g values into ru/en/custom tab'),
         BotCommand('ingredient', 'Find reference ingredient in Russian or English'),
