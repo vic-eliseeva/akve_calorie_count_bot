@@ -102,7 +102,7 @@ async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_group(update):
         await update.effective_message.reply_text('Создай группу с партнёром и ботом, затем отправь туда /chatid.')
         return
-    await update.effective_message.reply_text(f'Group ID: {update.effective_chat.id}\nСкопируй этот ID в переменную ALLOWED_CHAT_ID в Railway. Сам токен бота никому не отправляй.')
+    await update.effective_message.reply_text(f'ID группы: {update.effective_chat.id}\nСкопируй этот ID в переменную ALLOWED_CHAT_ID в Railway. Сам токен бота никому не отправляй.')
 
 
 async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -133,7 +133,7 @@ async def goal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text('Укажи разумные положительные числа, например /goal 2200 150.')
         return
     DB.set_goals(update.effective_user.id, calories, protein)
-    await update.effective_message.reply_text(f'Твои цели: {calories:g} kcal and {protein:g} g protein daily. У партнёра отдельные цели.')
+    await update.effective_message.reply_text(f'Твои цели: {calories:g} ккал и {protein:g} г белка в день. У партнёра отдельные цели.')
 
 
 def fmt(n: float | int) -> str:
@@ -159,9 +159,9 @@ def day_report(chat_id: int, day: str, only_user: int | None = None, detailed: b
         t = sum_meals(meals)
         lines.append(f"\n{m['name']}: {macros(t)}")
         if m['calories_goal'] is not None:
-            lines.append(f"Цели: {fmt(t['kcal'])}/{fmt(m['calories_goal'])} kcal; protein {fmt(t['protein'])}/{fmt(m['protein_goal'])}g")
+            lines.append(f"Цели: {fmt(t['kcal'])}/{fmt(m['calories_goal'])} ккал; белки {fmt(t['protein'])}/{fmt(m['protein_goal'])} г")
         if detailed:
-            lines.extend(f"  #{x['id']} {x['title']} — {fmt(x['kcal'])} kcal" for x in meals[-20:])
+            lines.extend(f"  #{x['id']} {x['title']} — {fmt(x['kcal'])} ккал" for x in meals[-20:])
         if not meals:
             lines.append('  Пока нет записанных блюд.')
     return '\n'.join(lines)[:3900]
@@ -233,7 +233,7 @@ async def show_long_reply(update: Update, message: str):
 
 
 def missing_answer(exc: MissingReferences) -> str:
-    lines = ['Пока не записала блюдо: не хватает надёжных данных.']
+    lines = ['Пока не записал блюдо: не хватает надёжных данных.']
     if exc.missing:
         lines.append('Не нашла в твоей таблице или USDA: ' + ', '.join(exc.missing))
         lines.append('Можешь написать обычным текстом, например: '
@@ -290,13 +290,13 @@ async def nightly_sync(context: ContextTypes.DEFAULT_TYPE):
 
 async def save_and_confirm(update: Update, result: FoodResult, text: str, source_kind: str):
     if not result.items:
-        await update.effective_message.reply_text('Пока ничего не записала. Напиши, что ты ел(а), и примерно сколько.')
+        await update.effective_message.reply_text('Пока ничего не записал. Напиши, что ты ел(а), и примерно сколько.')
         return
     stamp = now_local()
     try:
         mid = DB.add_meal(chat_id=ALLOWED_CHAT_ID, user_id=update.effective_user.id,
                           day=stamp.date().isoformat(), now=stamp.isoformat(),
-                          title=result.title or 'Meal', source_text=text,
+                          title=result.title or 'Блюдо', source_text=text,
                           source_kind=source_kind, items=ingredients(result),
                           assumptions=result.assumptions, confidence=result.confidence,
                           source_message_id=update.effective_message.message_id)
@@ -304,7 +304,7 @@ async def save_and_confirm(update: Update, result: FoodResult, text: str, source
         if 'UNIQUE constraint failed' in str(exc):
             return
         raise
-    message = breakdown(ingredients(result), result.title, heading=f'Записала #{mid}')
+    message = breakdown(ingredients(result), result.title, heading=f'Записал #{mid}')
     if result.assumptions:
         message += '\nДопущения: ' + result.assumptions[:600]
     message += '\nМожешь ответить на это сообщение, чтобы исправить состав или вес.'
@@ -323,7 +323,7 @@ async def process_food(update: Update, *, text: str, media: bytes | None = None,
                 await update.effective_message.reply_text('Не удалось распознать блюдо. Опиши еду и примерный вес.')
             return
         if result.action == 'question':
-            await show_long_reply(update, breakdown(ingredients(result), result.title or 'Food', heading='Только расчёт') + '\nНе записано.' if result.items else 'Please specify food ingredients and their gram weights; I cannot estimate nutrition without references.')
+            await show_long_reply(update, breakdown(ingredients(result), result.title or 'Еда', heading='Только расчёт') + '\nНе записано.' if result.items else 'Пожалуйста, уточни, что в блюде, и хотя бы примерный вес.')
             return
         await save_and_confirm(update, result, text, source_kind)
     except MissingReferences as exc:
@@ -383,7 +383,7 @@ async def revise_meal(update: Update, meal: dict | None, correction: str):
         DB.update_meal(ALLOWED_CHAT_ID, update.effective_user.id, meal['id'],
                        result.title or meal['title'], meal['source_text'] + '\nCorrection: ' + correction,
                        ingredients(result), result.assumptions, result.confidence)
-        detail = breakdown(ingredients(result), result.title or meal['title'], heading=f"Исправила #{meal['id']}")
+        detail = breakdown(ingredients(result), result.title or meal['title'], heading=f"Исправил #{meal['id']}")
         sent_id = await show_long_reply(update, detail)
         DB.set_response_message(meal['id'], sent_id)
         await sync_past(meal['day'])
@@ -456,7 +456,7 @@ async def copy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              assumptions=f'Копия записи #{mid}; те же справочные значения.',
                              confidence=source['confidence'], source_message_id=update.effective_message.message_id)
         reply_id = await show_long_reply(update,
-              breakdown(items, f"{source['title']} ×{factor:g}", heading=f'Записала #{new_id}'))
+              breakdown(items, f"{source['title']} ×{factor:g}", heading=f'Записал #{new_id}'))
         DB.set_response_message(new_id, reply_id)
     except Exception:
         logger.exception('Copy failed')
@@ -518,7 +518,7 @@ async def handle_ingredient_chat(update: Update, text: str, *, force: bool = Fal
         tab = await asyncio.to_thread(SHEETS.add_ingredient, kind, item)
         DB.clear_pending_ingredient(user_id)
         await update.effective_message.reply_text(
-            f'Готово, добавила «{item.name}» в лист «{tab}».\n'
+            f'Готово, добавил «{item.name}» в лист «{tab}».\n'
             f'На 100 г: {fmt(item.kcal)} ккал · Б {fmt(item.protein)} г · '
             f'Ж {fmt(item.fat)} г · У {fmt(item.carbs)} г.\n'
             'Можешь отправить блюдо ещё раз — теперь я использую эти значения.')
@@ -566,8 +566,8 @@ async def ingredient_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(f'Не нашла продукт: "{query}". Напиши «добавь в базу…», чтобы внести новый продукт.')
             return
         await update.effective_message.reply_text(
-            f'{found.name} (per 100g): {found.kcal:g} kcal | P {found.protein:g}g | '
-            f'F {found.fat:g}g | C {found.carbs:g}g.\nAliases: {", ".join(found.aliases) or "none"}')
+            f'{found.name} (на 100 г): {found.kcal:g} ккал | Б {found.protein:g} г | '
+            f'Ж {found.fat:g} г | У {found.carbs:g} г.\nДругие названия: {", ".join(found.aliases) or "нет"}')
     except Exception:
         logger.exception('Ingredient lookup failed')
         await update.effective_message.reply_text('Пока не удаётся прочитать Google Sheets. Проверь /sheetstatus.')
@@ -579,9 +579,9 @@ async def ingredients_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         foods = await asyncio.to_thread(SHEETS.ingredients)
         lines = [f'Ингредиентов в Google Sheet ({len(foods)}):']
-        lines.extend(f'- {x.name} ({x.kcal:g} kcal/100g)' for x in foods[:70])
+        lines.extend(f'- {x.name} ({x.kcal:g} ккал/100 г)' for x in foods[:70])
         if len(foods) > 70:
-            lines.append(f'...and {len(foods)-70} more. Найди нужный командой /ingredient NAME.')
+            lines.append(f'…и ещё {len(foods)-70}. Найди нужный командой /ingredient NAME.')
         await update.effective_message.reply_text('\n'.join(lines)[:3900])
     except Exception:
         logger.exception('Ingredients list failed')
@@ -593,7 +593,7 @@ async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         if len(context.args) > 1:
-            raise ValueError('Use /sync or /sync YYYY-MM-DD')
+            raise ValueError('Напиши /sync или /sync YYYY-MM-DD')
         if context.args:
             date.fromisoformat(context.args[0])
             days = [context.args[0]]
@@ -615,7 +615,7 @@ async def sheetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             f'Google Sheet подключён. Продуктов: {len(items)} ингредиентов.\n'
             f'Листы продуктов: База продуктов, База ингредиентов, Ingredients base\nЛист ежедневных итогов: {SHEETS.daily_tab}\n'
-            'Автоматический экспорт: 00:05 Europe/Copenhagen (previous day).')
+            'Автоматический экспорт: 00:05 по Копенгагену (за вчерашний день).')
     except Exception as exc:
         await update.effective_message.reply_text(f'Нет подключения к Google Sheet: {str(exc)[:450]}')
 
