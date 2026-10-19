@@ -346,32 +346,31 @@ async def revise_meal(update: Update, meal: dict | None, correction: str):
     if not await demand_owner(update):
         return
     if not meal:
-        await update.effective_message.reply_text('Meal not found. Use /mine to see your meal IDs.')
+        await update.effective_message.reply_text('Meal not found. Use /mine for meal IDs.')
         return
     if meal['telegram_user_id'] != update.effective_user.id:
         await update.effective_message.reply_text('Only the person who logged a meal may correct it.')
         return
     if not correction:
-        await update.effective_message.reply_text('Describe the correction, e.g. /editlast rice was 150g, not 250g.')
+        await update.effective_message.reply_text('Describe correction, e.g. /editlast rice was 150g, not 250g.')
         return
     try:
         result = await analyze(correction, correction=meal, force_log=True)
         if not result.items:
-            await update.effective_message.reply_text('Could not recalculate that meal. Try specifying what changed.')
+            await update.effective_message.reply_text('Cannot identify corrected food and weight.')
             return
         DB.update_meal(ALLOWED_CHAT_ID, update.effective_user.id, meal['id'],
                        result.title or meal['title'], meal['source_text'] + '\nCorrection: ' + correction,
                        ingredients(result), result.assumptions, result.confidence)
-        resp = f"Updated #{meal['id']} · {result.title}\n{macros(DB.totals(ingredients(result)))}"
-        if result.assumptions:
-            resp += '\nAssumptions: ' + result.assumptions[:450]
-        sent = await update.effective_message.reply_text(resp[:3900])
-        DB.set_response_message(meal['id'], sent.message_id)
+        detail = breakdown(ingredients(result), result.title or meal['title'], heading=f"Updated #{meal['id']}")
+        sent_id = await show_long_reply(update, detail)
+        DB.set_response_message(meal['id'], sent_id)
         await sync_past(meal['day'])
+    except MissingReferences as exc:
+        await show_long_reply(update, missing_answer(exc))
     except Exception:
         logger.exception('Correction failed')
-        await update.effective_message.reply_text('Could not update this meal. Check the Gemini API and try again.')
-
+        await update.effective_message.reply_text('Could not update meal. Check Google Sheets/Gemini.')
 
 async def editlast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await demand_owner(update):
@@ -411,31 +410,36 @@ async def copy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not (0 < factor <= 10):
             raise ValueError()
     except (ValueError, IndexError):
-        await update.effective_message.reply_text('Usage: /copy 12 0.75 (copies 75% of meal #12 to YOUR diary)')
+        await update.effective_message.reply_text('Usage: /copy 12 0.75')
         return
     source = DB.by_id(ALLOWED_CHAT_ID, mid)
     if not source:
-        await update.effective_message.reply_text('Meal ID not found. Your partner can find it with /mine.')
+        await update.effective_message.reply_text('Meal not found. Your partner can find it using /mine.')
         return
     items = json.loads(source['ingredients_json'])
+    nutrients = ('kcal','protein','fat','carbs')
+    if any(not all(item.get(k) is not None for k in
+                   ('reference','portion_g',*(f'per100_{n}' for n in nutrients)))
+           for item in items):
+        await update.effective_message.reply_text('This older entry lacks ingredient reference details; please log your portion afresh.')
+        return
     for item in items:
-        item['name'] += f' (×{factor:g})'
-        for key in ('kcal', 'protein', 'fat', 'carbs'):
-            item[key] = round(item[key] * factor, 2)
+        item['portion_g'] = round(item['portion_g'] * factor, 3)
+        for n in nutrients:
+            item[n] = round(item[f'per100_{n}'] * item['portion_g'] / 100, 2)
     try:
         new_id = DB.add_meal(chat_id=ALLOWED_CHAT_ID, user_id=update.effective_user.id,
                              day=now_local().date().isoformat(), now=now_local().isoformat(),
                              title=f"{source['title']} ×{factor:g}", source_text=f'Copy #{mid} ×{factor:g}',
                              source_kind='copy', items=items,
-                             assumptions=f'Copied from entry #{mid}; quantities scaled by factor {factor:g}.',
-                             confidence=source['confidence'], source_message_id=update.effective_message.message_id)
-        response = await update.effective_message.reply_text(
-            f"Saved #{new_id} · copied #{mid} ×{factor:g}\n{macros(DB.totals(items))}")
-        DB.set_response_message(new_id, response.message_id)
+                             assumptions=f'Copied from entry #{mid}; same saved spreadsheet macros.',
+                             confidence='high', source_message_id=update.effective_message.message_id)
+        reply_id = await show_long_reply(update,
+              breakdown(items, f"{source['title']} ×{factor:g}", heading=f'Saved #{new_id}'))
+        DB.set_response_message(new_id, reply_id)
     except Exception:
         logger.exception('Copy failed')
-        await update.effective_message.reply_text('Could not copy the meal. Check server logs.')
-
+        await update.effective_message.reply_text('Could not copy meal. See server logs.')
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await demand_owner(update):
@@ -461,25 +465,28 @@ async def ingredientadd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     raw = (update.effective_message.text or '').partition(' ')[2].strip()
     fields = [f.strip() for f in raw.split('|')]
-    if len(fields) not in (5, 6):
+    if len(fields) != 6 or fields[0].lower() not in ('ru','en','custom'):
         await update.effective_message.reply_text(
-            'Usage (values PER 100g):\n/ingredientadd Творог 1.5% | 73 | 12 | 1.5 | 2.7 | cottage cheese 1.5%, quark 1.5%')
+            'Provide source and values PER 100g: kcal | protein | fat | carbs\n'
+            '/ingredientadd ru | Творог 1.5% | 73 | 12 | 1.5 | 2.7\n'
+            '/ingredientadd en | Cottage cheese | 73 | 12 | 1.5 | 2.7\n'
+            '/ingredientadd custom | Скир, Скюр | 57 | 10 | 0.2 | 3.5')
         return
     try:
-        def num(value):
-            return float(value.replace(',', '.'))
-        aliases = tuple(a.strip() for a in fields[5].split(',') if a.strip()) if len(fields) == 6 else ()
-        ing = Ingredient(fields[0], aliases, *(num(x) for x in fields[1:5]),
-                         updated_at=now_local().isoformat(), updated_by=update.effective_user.first_name)
-        status = await asyncio.to_thread(SHEETS.upsert_ingredient, ing)
+        kind = fields[0].lower()
+        values = [float(v.replace(',', '.')) for v in fields[2:6]]
+        names = [x.strip() for x in fields[1].split(',') if x.strip()] if kind == 'custom' else [fields[1]]
+        if not names:
+            raise ValueError('Missing ingredient name')
+        item = Ingredient(names[0], tuple(names[1:]), *values)
+        tab = await asyncio.to_thread(SHEETS.add_ingredient, kind, item)
         await update.effective_message.reply_text(
-            f'{ing.name}: {status} in Google Sheet. Per 100 g: {ing.kcal:g} kcal | '
-            f'P {ing.protein:g}g | F {ing.fat:g}g | C {ing.carbs:g}g.\n'
-            f'Russian/English aliases: {", ".join(ing.aliases) or "none"}.')
+            f'Added to {tab}.\n'
+            f'{item.name}, per 100 g: {macros({"kcal":item.kcal,"protein":item.protein,"fat":item.fat,"carbs":item.carbs})}\n'
+            'Resend your meal for recalculation using this reference.')
     except Exception as exc:
-        logger.warning('Ingredient save failed: %s', exc)
-        await update.effective_message.reply_text(f'Ingredient not saved: {str(exc)[:450]}')
-
+        logger.warning('Ingredient addition rejected: %s', exc)
+        await update.effective_message.reply_text(f'Not saved: {str(exc)[:450]}')
 
 async def ingredient_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_sheet(update):
@@ -542,7 +549,7 @@ async def sheetstatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         items = await asyncio.to_thread(SHEETS.ingredients)
         await update.effective_message.reply_text(
             f'Connected to Google Sheet: {len(items)} saved ingredients.\n'
-            f'Ingredients tab: {SHEETS.ingredients_tab}\nDaily results tab: {SHEETS.daily_tab}\n'
+            f'Ingredient tabs: База продуктов, База ингредиентов, Ingredients base\nDaily results tab: {SHEETS.daily_tab}\n'
             'Nightly export: 00:05 Europe/Copenhagen (previous day).')
     except Exception as exc:
         await update.effective_message.reply_text(f'Google Sheet connection failed: {str(exc)[:450]}')
@@ -607,9 +614,9 @@ async def set_commands(application: Application):
         BotCommand('editlast', 'Correct your latest meal'),
         BotCommand('undo', 'Remove latest meal'),
         BotCommand('copy', 'Copy a meal to your diary'),
-        BotCommand('estimate', 'Estimate macros without saving'),
+        BotCommand('estimate', 'Calculate verified macros without saving'),
         BotCommand('export', 'Export shared diary to CSV'),
-        BotCommand('ingredientadd', 'Save ingredient macros per 100g in Google Sheets'),
+        BotCommand('ingredientadd', 'Add per-100g values into ru/en/custom tab'),
         BotCommand('ingredient', 'Find reference ingredient in Russian or English'),
         BotCommand('ingredients', 'List reference ingredients'),
         BotCommand('sync', 'Sync both users daily macros to Google Sheets'),
