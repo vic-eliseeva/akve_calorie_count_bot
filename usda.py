@@ -60,7 +60,7 @@ class PublicFood:
 def _nutrients(food: dict) -> dict | None:
     found: dict[int, float] = {}
     for n in food.get("foodNutrients", []):
-        number = n.get("nutrientNumber") or n.get("number") or n.get("nutrientId")
+        number = n.get("nutrientId") or n.get("number") or n.get("nutrientNumber")
         try:
             code = int(number)
             amount = float(n.get("value", n.get("amount")))
