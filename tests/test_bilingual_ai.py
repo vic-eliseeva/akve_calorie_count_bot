@@ -66,7 +66,7 @@ class BilingualAIWiringTests(unittest.TestCase):
         self.assertIn('Творог 1.5%', client.calls[0]['contents'][0])
         self.assertIn('cottage cheese 1.5%', client.calls[1]['contents'][0])
         self.assertEqual(client.calls[2]['contents'][1], {'data': b'fake-ogg-opus', 'mime_type': 'audio/ogg'})
-        self.assertIn('Russian/English', client.calls[0]['config'].options['system_instruction'])
+        self.assertIn('русском', client.calls[0]['config'].options['system_instruction'])
 
 if __name__ == '__main__':
     unittest.main()
