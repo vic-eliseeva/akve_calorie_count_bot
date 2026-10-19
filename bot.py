@@ -142,7 +142,7 @@ def fmt(n: float | int) -> str:
 
 
 def macros(t: dict) -> str:
-    return f"{fmt(t['kcal'])} kcal | P {fmt(t['protein'])}g | F {fmt(t['fat'])}g | C {fmt(t['carbs'])}g"
+    return f"{fmt(t['kcal'])} ккал | Б {fmt(t['protein'])} г | Ж {fmt(t['fat'])} г | У {fmt(t['carbs'])} г"
 
 
 def sum_meals(meals: list[dict]) -> dict:
@@ -305,6 +305,8 @@ async def save_and_confirm(update: Update, result: FoodResult, text: str, source
             return
         raise
     message = breakdown(ingredients(result), result.title, heading=f'Записала #{mid}')
+    if result.assumptions:
+        message += '\nДопущения: ' + result.assumptions[:600]
     message += '\nМожешь ответить на это сообщение, чтобы исправить состав или вес.'
     reply_id = await show_long_reply(update, message)
     DB.set_response_message(mid, reply_id)
