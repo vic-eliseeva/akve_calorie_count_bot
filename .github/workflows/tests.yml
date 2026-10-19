@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+concurrency:
+  group: bot-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -16,6 +19,6 @@ jobs:
       - name: Install runtime dependencies
         run: pip install -r requirements.txt
       - name: Verify Python syntax
-        run: python -m compileall -q bot.py nutrition.py google_sheets.py database.py
+        run: python -m compileall -q bot.py nutrition.py google_sheets.py database.py usda.py ingredient_chat.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
