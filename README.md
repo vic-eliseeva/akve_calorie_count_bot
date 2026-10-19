@@ -1,21 +1,31 @@
-# AKVE Duo Food Bot — strict ingredient-based calorie and macro logging
+# AKVE Duo Food Bot — conversational Russian food diary with transparent estimates
 
-Two people use one private Telegram group. The bot reads Russian and English text, voice notes and food photos. Nutritional values come from **your Google Sheet first**, with a **verified USDA FoodData Central online fallback for confidently identified simple ingredients**. AI does not invent numerical calories or macros. Unknown mixed meals, unclear matches, and uncertain quantities still require clarification.
+Two people use one private Telegram group. The bot reads Russian and English text, voice notes and food photos. Nutritional values come from **your Google Sheet first**, with a **verified USDA FoodData Central online fallback for confidently identified simple ingredients**. For canteen/restaurant dishes and food photos, it can also produce **clearly labeled visual estimates** of weights and nutritional values when no trustworthy reference exists. These are approximate, not sourced nutritional facts.
 
 **Google spreadsheet:** https://docs.google.com/spreadsheets/d/1w6s6N5IpNHtuYUHBT6QO3PJ2ZDsLVysq4iHIQXLZg1A/edit
 
-## Rules: Google Sheet first, cited public averages second, full arithmetic
+## How it works — natural conversation, no required slash commands
 
-1. Identify EVERY ingredient (including dressings, cooking oils, sauces and drinks) and its actual measured grams.
-2. Find a matching ingredient in the spreadsheet. Gemini extracts ingredient identities and quantities; it never supplies nutrient numbers.
-3. When an ingredient is not in your Sheet, the bot may query USDA FoodData Central for a confidently matched *simple unbranded food* such as raw banana or mango. It uses the actual returned kcal, protein, fat, and carbs per 100g and shows a source link. USDA values are labeled **online estimates**; they are not silently copied to the Sheet.
-4. For a mixed restaurant dish, casserole, branded food, uncertain USDA match, unavailable public lookup, or missing gram weight, **do not log ANY part of the meal**. Ask for ingredient details, accurate weight or user-provided per-100g values. Never hallucinate a recipe.
-5. For a complete meal, calculate every ingredient's kcal, P, F and C as `(reference per 100 g × eaten grams) / 100`. Show the arithmetic for each ingredient in the Telegram reply, followed by totals. The calculation is visible for saved meals, /estimate requests, meal edits and copied meals. Long replies are split into multiple Telegram messages.
-6. Keep separate food histories and daily totals for the two Telegram accounts. Never log a batch recipe unless the user explicitly says they ate it.
+The two participants may simply message or voice-record:
+- `Добавь мне 100 г банана и 150 г манго` — logs food using the Sheet first and a cited USDA reference for missing simple foods.
+- `Вот мой обед` + photo — identifies visible components and estimates portion sizes, showing which gram weights are **visual assumptions**.
+- `Я съела в столовой пасту с соусом` — if composition is ambiguous, shows **rough AI food estimates** with low confidence and assumptions, never pretending those are measured or verified values.
+- `Сколько будет КБЖУ в 150 г риса?` — calculates but **does not log** an uneaten meal.
+- `Давай добавим в базу творог 1,5%, на 100 грамм 73 ккал, белков 12, жиров 1,5, углеводов 2,7` — writes a verified entry to the appropriate tab.
+- `Добавь новый продукт скир` followed by another message with the four nutrient figures — keeps a private, per-person pending entry until complete.
 
-**Known limitation:** Photos without a reliable measured weight require clarification, not a guessed quantity. Public-average values vary with variety and ripeness. The AI can misunderstand a name, so check the source shown in the calculation. USDA fallback is deliberately conservative; if a product or preparation is not an exact match, it asks instead.
+**Source hierarchy per ingredient:**
+1. Your own three-tab Google Sheet reference, including product aliases;
+2. A conservatively matched [USDA FoodData Central](https://fdc.nal.usda.gov/api-guide/) online per-100g average (a URL is shown);
+3. **Only for food photos, restaurant/canteen meals or explicit requests to roughly estimate**: clearly marked AI approximation, including assumptions about visible components, per-100g values and assumed grams. This third fallback is not an internet fact and should be treated as rough bookkeeping.
 
-**Online fallback:** [USDA FoodData Central](https://fdc.nal.usda.gov/api-guide/). Works without extra setup using the documented low-quota `DEMO_KEY` (30 requests/hour, 50/day per IP). For regular use, get a free FoodData Central key and set Railway variable `FDC_API_KEY` (never commit the secret). The key is independent of your Google Sheets service account. The bot uses a cache while running, but rate limits and transient USDA downtime can still prevent some lookups.
+The bot displays **kcal, protein, fat and carbohydrates for each identified component**, with the arithmetic `per 100 g × grams / 100`, the component's source and meal total. Estimated inputs are explicitly labeled; you can reply to the saved message with corrections. Where ingredients are unclear and no defensible estimate is possible, the bot asks instead of quietly omitting them.
+
+Photos and restaurants can have substantial uncertainty (portion size, oil, ingredients inside sauces). If you supply actual weights or a nutrition label, those values take priority. The bot will not silently add assumed ingredients to your spreadsheet.
+
+The bot responds in Russian even when users type or record in English. Ordinary messages from the two people go through the existing separate-account diary; normal conversation not about food can be ignored.
+
+**USDA API key:** Without a key, the bot can use the low-limit `DEMO_KEY`; for frequent use set Railway variable `FDC_API_KEY` from [USDA's API guide](https://fdc.nal.usda.gov/api-guide/). This is separate from your Gemini key and service-account credentials.
 
 ## The FOUR remaining Google Sheet tabs
 
@@ -28,17 +38,21 @@ The obsolete `Bot Ingredients` sheet was empty and has been deleted. The bot nev
 
 Priority for duplicate ingredient names: `База продуктов` → `База ингредиентов` → `Ingredients base`. New ingredients are appended to the tab selected explicitly in Telegram; existing rows are never overwritten.
 
-## Adding values to the actual reference tabs
+## Adding ingredients conversationally or directly in Google Sheets
 
-All numbers must come from the user, **per 100 g**, in this order: kcal | protein | fat | carbohydrates.
+You can edit the original three data tabs directly as before, or simply talk to the bot:
 
 ```text
-/ingredientadd ru | Творог 1.5% | 73 | 12 | 1.5 | 2.7
-/ingredientadd en | Cottage cheese | 73 | 12 | 1.5 | 2.7
-/ingredientadd custom | Скюр, Скир | 57 | 10 | 0.2 | 3.5
+Добавь в базу творог 1,5%. На 100 г: 73 ккал, белки 12 г, жиры 1,5 г, углеводы 2,7 г.
+Add a new English ingredient: rye flakes. Per 100g 350 kcal, 10g protein, 2g fat, 72g carbs.
+Добавь в базу мой брендовый йогурт, на упаковку 200 г: 120 ккал, 20 г белка, 0 жиров, 10 г углеводов.
 ```
 
-Specify `ru`, `en`, or `custom`; the bot won't guess a destination. The `custom` name field may list aliases separated by commas. Duplicate names are rejected; to correct an existing value, edit its original row in Google Sheets and resend the meal. For a missing food, the bot requests all four numerical values and does not silently skip anything.
+The bot extracts user-supplied numbers from free text and divides by serving grams when the basis is explicit, then adds the result as kcal/P/F/C **per 100 g**. It asks clarifying questions if any of the four nutrients, the name or the weight basis is missing. It remembers the unfinished request separately for each person in SQLite, including across restarts, and `отмена` abandons it.
+
+Russian names go to `База ингредиентов`, English names to `Ingredients base`; clearly branded/custom products can go to `База продуктов`. The old `/ingredientadd ru | name | kcal | protein | fat | carbs` syntax continues to work, but isn't required. Duplicate ingredient names are rejected; edit the existing cell directly to correct it.
+
+A database addition isn't a meal log. After adding values, resend the food message to log it. The bot does not invent missing label values or silently convert data when the serving size is ambiguous.
 
 ## Railway setup
 
@@ -66,7 +80,7 @@ Specify `ru`, `en`, or `custom`; the bot won't guess a destination. The `custom`
 
 ## Verification before relying on it
 
-Run `python -m unittest discover -s tests -v`. Offline tests verify Sheet priority, USDA public lookup matching for simple foods, strict no-guess behavior for mixed/unknown dishes, original-tab writes, bilingual voice request wiring, and two-person daily exports. After deploying, test text, Russian and English voice, a photo without measured weights, an unknown mixed meal, a 100 g banana not in the sheet, a known meal with detailed arithmetic, `/editlast`, and `/sync`. Real Gemini speech recognition, private Google-service-account access and timed nightly exports cannot be verified without the deployment credentials.
+Run `python -m unittest discover -s tests -v`. Offline tests verify Sheet priority, USDA public lookup matching, full per-ingredient calculations, the no-estimate default for ordinary unknown recipes, controlled restaurant/photo estimates, natural multi-turn ingredient intake, bilingual audio wiring and two-person exports. After deploying, test text, Russian and English voice, a restaurant photo with guessed weights, an unknown mixed meal, a 100 g banana not in the sheet, a known meal with detailed arithmetic, `/editlast`, and `/sync`. Real Gemini speech recognition, private Google-service-account access and timed nightly exports cannot be verified without the deployment credentials.
 
 ## Telegram commands
 
