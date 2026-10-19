@@ -118,7 +118,7 @@ def _match_score(query: str, food: dict) -> int | None:
 
 class USDAFoodLookup:
     def __init__(self, api_key: str | None = None, session=None):
-        self.api_key = api_key or os.getenv("FDC_API_KEY", "DEMO_KEY")
+        self.api_key = (api_key or os.getenv("FDC_API_KEY", "")).strip() or "DEMO_KEY"
         self.session = session if session is not None else requests.Session()
         self.cache: dict[str, PublicFood | None] = {}
 
