@@ -31,7 +31,7 @@ sys.modules['google.genai.types'] = types_mod
 google.genai = genai
 
 from nutrition import NutritionAI, FoodResult, FoodItem
-from google_sheets import Ingredient
+from google_sheets import Ingredient, calculate_from_table
 
 
 class RecordingGemini:
@@ -57,13 +57,16 @@ class BilingualAIWiringTests(unittest.TestCase):
                             ('Russian and English in voice', b'fake-ogg-opus')]:
             response = ai.interpret(text=text, media=audio, mime='audio/ogg' if audio else None,
                                     references=reference)
+            # The AI may extract the food identity/weight, but it must never set macros.
+            self.assertEqual((response.items[0].kcal, response.items[0].protein), (0, 0))
+            calculate_from_table(response, reference)
             self.assertEqual((response.items[0].kcal, response.items[0].protein,
                               response.items[0].fat, response.items[0].carbs), (146, 24, 3, 5.4))
         self.assertEqual(len(client.calls), 3)
         self.assertIn('Творог 1.5%', client.calls[0]['contents'][0])
         self.assertIn('cottage cheese 1.5%', client.calls[1]['contents'][0])
         self.assertEqual(client.calls[2]['contents'][1], {'data': b'fake-ogg-opus', 'mime_type': 'audio/ogg'})
-        self.assertIn('Russian or English', client.calls[0]['config'].options['system_instruction'])
+        self.assertIn('Russian/English', client.calls[0]['config'].options['system_instruction'])
 
 if __name__ == '__main__':
     unittest.main()
