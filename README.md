@@ -4,6 +4,20 @@
 
 **Status:** Full source code and offline tests (database, Russian/English text and OGG input plumbing with a mocked AI response, bilingual aliases, per-100g calculation, Google Sheets API request shapes with a simulated spreadsheet, and idempotent daily summaries). **Your exact spreadsheet ID and existing tab names are preconfigured and its column headers were verified through Google Drive. The independent bot has not authenticated to your Google account yet.** The real AI language and audio recognition, API permissions, Google Sheets writes, and midnight scheduled run must be verified after deployment. Do not assume this zip is a live bot.
 
+## Ingredient reference update — AK/VE meal prep plan (October 2026)
+
+The existing **AKVE calorie count master** Google spreadsheet contains these **original, unchanged data tables** imported from the source workbook:
+
+- `Ingredients base`: English ingredient data, columns A–F. Category A, name B, kcal/protein/fat/carbs C–F.
+- `База ингредиентов`: Russian ingredient data, columns A–F; other non-nutrition notes and translations are kept exactly as received.
+- `База продуктов`: custom product data, columns A–H. Comments A, names B, macros C–F, optional fiber G, original consistency-check formulas H.
+- `Bot Ingredients`: separate bot-maintained overrides and additions. No commands overwrite the three source tabs.
+- `Bot Daily Totals`: unchanged daily export with one row per person per day.
+
+**Priority for food reference lookup:** Bot Ingredients → База продуктов → База ингредиентов → Ingredients base. Existing rows are read without modification. Identical product names across tables use the highest-priority reference. Blank, untranslated, or non-numeric macro rows stay in the source workbook but cannot be used for macro arithmetic. In custom-product names, comma-delimited alternate names are supported for lookup. Daily totals still sync at 00:05 Europe/Copenhagen.
+
+To change a source product, edit the original cell in Google Sheets; the bot reads it on subsequent messages. To add a new product from Telegram, use `/ingredientadd` (writes only to Bot Ingredients). The bot requires all three source tabs at startup; don't rename them without changing the code. The original uploaded workbook stays untouched.
+
 ## What is stored in your existing Google spreadsheet?
 
 These two tabs **already exist** in your AKVE spreadsheet, with the exact matching column headers; the bot will reuse them without changing unrelated tabs:
