@@ -17,6 +17,9 @@ class FoodItem(BaseModel):
     name: str = Field(description='One consumed ingredient without weight included in name')
     portion_g: float | None = Field(default=None, description='Weight in grams; null if not confirmed')
     reference: str | None = Field(default=None, description='Exact Google Sheets ingredient name or alias, else null')
+    lookup_query: str | None = Field(default=None, description='Short English singular name for a generic whole food not found in the sheet, e.g. banana or mango; null otherwise')
+    simple_ingredient: bool = Field(default=False, description='True only for one basic unbranded, single-ingredient food, never a mixed prepared meal, recipe, flavored or branded product')
+    source_url: str = ''
     kcal: float = 0
     protein: float = 0
     fat: float = 0
@@ -38,8 +41,17 @@ class FoodResult(BaseModel):
 
 
 PROMPT = """Extract ingredient names and measured quantities for a Russian/English food diary.
-NEVER calculate or invent kcal, protein, fat or carbohydrates. Only the Google Sheet may
-provide those values. Identify EVERY ingredient separately, including oil, sauce and drinks.
+NEVER calculate or invent kcal, protein, fat or carbohydrates. Numeric
+nutrients come ONLY from the spreadsheet or verified USDA online lookup done by the application.
+Identify EVERY ingredient separately, including oil, sauce and drinks.
+- Google Sheet matches always take priority. For other simple, unbranded, ONE-ingredient foods
+  such as raw banana or mango, set simple_ingredient=true and lookup_query to the
+  exact generic English food name, e.g. "banana" or "mango".
+- For any mixed dish (lasagna, restaurant food, stew, cake, smoothie, etc.), composite food,
+  branded item, unclear variety/cooking state, or a guessed recipe: simple_ingredient=false.
+  Split the dish into ingredients only if the user provided them. Never assume a recipe.
+- lookup_query does not supply nutritional facts; the app independently queries USDA
+  and accepts only sufficiently exact matches. If uncertain, ask the user instead.
 - Ingredient name must exclude the weight; portion_g is grams or null if not known.
 - Never invent weights, calorie values, ingredients or substitutes.
 - Accept English/Russian text, voice, images and mixed-language messages.
@@ -95,6 +107,7 @@ class NutritionAI:
             item.kcal = item.protein = item.fat = item.carbs = 0
             item.per100_kcal = item.per100_protein = item.per100_fat = item.per100_carbs = None
             item.source_tab = ''
+            item.source_url = ''
             if item.portion_g is not None and (not math.isfinite(item.portion_g) or item.portion_g <= 0):
                 item.portion_g = None
         return result
