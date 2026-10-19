@@ -100,7 +100,7 @@ def calculate_from_table(result, references: list[Ingredient], online_lookup=Non
         if source is None:
             estimated = [getattr(item, 'estimated_per100_'+nutrient, None)
                          for nutrient in ('kcal','protein','fat','carbs')]
-            safe = (allow_estimates and not getattr(item, 'simple_ingredient', False)
+            safe = (allow_estimates
                     and bool(str(getattr(item, 'estimate_note', '') or '').strip())
                     and all(isinstance(x, (int, float)) and math.isfinite(x) for x in estimated)
                     and 0 < estimated[0] <= 1000
