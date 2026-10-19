@@ -224,8 +224,8 @@ class GoogleSheets:
                 aliases_from_translation = ()
                 # The lower part of the Russian sheet has Danish in B, Russian in D,
                 # and kcal/P/F/C in E:H instead of C:F. Keep the source untouched.
-                if tab == 'База ингредиентов' and len(row) >= 8 and not str(row[2]).strip():
-                    if str(row[3]).strip():
+                if tab == 'База ингредиентов' and len(row) >= 8 and not str(row[2] if row[2] is not None else '').strip():
+                    if row[3] is not None and str(row[3]).strip():
                         aliases_from_translation = (str(row[3]).strip(),)
                     nutrients = row[4:8]
                 try:
