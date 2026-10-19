@@ -1,6 +1,6 @@
 """Gemini extracts food names and weights from Russian/English text, photos and audio.
 
-ALL nutritional figures are taken from the connected Google Sheet, not Gemini.
+Verified figures come from Google Sheets or USDA; restaurant/photo guesses are labeled.
 """
 from __future__ import annotations
 
