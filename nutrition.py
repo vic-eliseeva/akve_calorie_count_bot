@@ -1,5 +1,7 @@
-"""Multimodal Gemini nutrition estimation; never used as a medical/nutrition database."""
+"""Gemini extracts food names and weights from Russian/English text, photos and audio.
 
+ALL nutritional figures are taken from the connected Google Sheet, not Gemini.
+"""
 from __future__ import annotations
 
 import json
@@ -12,10 +14,9 @@ from google.genai import types
 
 
 class FoodItem(BaseModel):
-    name: str = Field(description="One ingredient name, without the portion weight")
-    portion_g: float | None = Field(default=None, description="Known weight in grams; unknown -> null")
-    reference: str | None = Field(default=None, description="Exact name or alias from provided ingredient list, otherwise null")
-    # Application-owned values, never trusted from AI.
+    name: str = Field(description='One consumed ingredient without weight included in name')
+    portion_g: float | None = Field(default=None, description='Weight in grams; null if not confirmed')
+    reference: str | None = Field(default=None, description='Exact Google Sheets ingredient name or alias, else null')
     kcal: float = 0
     protein: float = 0
     fat: float = 0
@@ -36,23 +37,22 @@ class FoodResult(BaseModel):
     answer: str = ''
 
 
-PROMPT = """You extract food ingredient names and consumed weights for two people sharing
-a Russian/English Telegram food diary. You DO NOT calculate calorie or macro values.
-Only the authoritative Google Sheet has calories, protein, fat, and carbohydrates.
-Extract EACH ingredient separately, including oil, sauces, drinks, and additions.
-Do not invent ingredients, weights, nutritional values or assumptions.
-- Ingredient name is without grams; portion_g is the known weight in grams.
-- If the quantity is unknown, portion_g=null. Photos alone cannot accurately weigh food.
-- Only match a name to the explicitly provided ingredient reference list. For exact,
-  confident matching, set reference to canonical name or alias; otherwise null.
-- Be careful with raw versus cooked weights. Never guess oil amounts.
-- action=log only when food was actually eaten/drunk or /log is explicitly used.
-- action=question for recipes, hypothetical food, macro calculations or estimation requests.
-- action=ignore for messages that are not about food or meals.
-- When correcting a meal, return ALL ingredients with corrected amounts; retain unchanged items.
-- Handle both Russian and English text and voice, including mixed-language messages.
-- Respond in the user's language; don't assert that a meal was saved.
+PROMPT = """Extract ingredient names and measured quantities for a Russian/English food diary.
+NEVER calculate or invent kcal, protein, fat or carbohydrates. Only the Google Sheet may
+provide those values. Identify EVERY ingredient separately, including oil, sauce and drinks.
+- Ingredient name must exclude the weight; portion_g is grams or null if not known.
+- Never invent weights, calorie values, ingredients or substitutes.
+- Accept English/Russian text, voice, images and mixed-language messages.
+- For photos without a known weight, return null grams and request clarification.
+- Only set reference to an EXACT, confident Google Sheet name or alias; otherwise null.
+  Distinguish cooked from raw weights, brands, and fat percentages.
+- action=log if a meal was eaten or user explicitly uses /log; action=question for
+  recipes and calculation requests; action=ignore for unrelated chat.
+- For corrections return every ingredient (including unchanged ones), with original weights
+  preserved except where the user explicitly changes them.
+- Never claim food was saved. The app validates ALL ingredients before logging.
 """
+
 
 class NutritionAI:
     def __init__(self, api_key: str, model: str):
@@ -62,43 +62,35 @@ class NutritionAI:
     def interpret(self, *, text: str = '', media: bytes | None = None, mime: str | None = None,
                   force_log: bool = False, correction: dict | None = None,
                   references: list | None = None) -> FoodResult:
-        instruction = "Analyze this incoming Telegram food diary message."
+        instruction = 'Extract all ingredient names and verified gram quantities.'
         if force_log:
-            instruction += " User explicitly used /log: log this meal unless no edible content can be found."
+            instruction += ' The user requests logging (only if complete and verified).'
         if correction:
-            instruction = "REVISE this existing meal to reflect the correction. Keep unaffected foods and quantities. "
-            instruction += "Existing meal JSON: " + json.dumps({
+            instruction += '\nOriginal saved meal: ' + json.dumps({
                 'title': correction['title'],
                 'items': json.loads(correction['ingredients_json']),
-                'assumptions': correction['assumptions'],
-                'original_text': correction['source_text'],
-            }, ensure_ascii=False)
-            instruction += "\nRequested correction: " + text
+                'original_text': correction['source_text']}, ensure_ascii=False)
+            instruction += '\nRequested correction: ' + text
         else:
-            instruction += "\nText or photo caption: " + (text or '(no text)')
-        if references:
-            ingredients = [{'name': i.name, 'aliases': list(i.aliases)} for i in references]
-            instruction += "\nGOOGLE SHEET REFERENCE INGREDIENT NAMES/ALIASES ONLY: " + json.dumps(ingredients, ensure_ascii=False)
-        contents: list = [instruction]
+            instruction += '\nIncoming message: ' + (text or '(audio or image without caption)')
+        instruction += '\nEXACT known Google Sheet names and aliases: ' + json.dumps([
+            {'name': item.name, 'aliases': list(item.aliases)}
+            for item in (references or [])], ensure_ascii=False)
+        contents = [instruction]
         if media is not None:
             contents.append(types.Part.from_bytes(data=media, mime_type=mime or 'application/octet-stream'))
         response = self.client.models.generate_content(
-            model=self.model,
-            contents=contents,
+            model=self.model, contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=PROMPT,
-                response_mime_type='application/json',
-                response_schema=FoodResult,
-                temperature=0.1,
-            ),
-        )
+                system_instruction=PROMPT, temperature=0.1,
+                response_mime_type='application/json', response_schema=FoodResult))
         result = response.parsed
         if not isinstance(result, FoodResult):
             result = FoodResult.model_validate_json(response.text)
         if correction or force_log:
             if result.action == 'question' and result.items:
                 result.action = 'log'
-        # Completely discard any nutritional numbers the AI may have generated.
+        # Provider-supplied nutrition data is never trustworthy, even if returned anyway.
         for item in result.items:
             item.kcal = item.protein = item.fat = item.carbs = 0
             item.per100_kcal = item.per100_protein = item.per100_fat = item.per100_carbs = None
