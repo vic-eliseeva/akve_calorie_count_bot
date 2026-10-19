@@ -189,18 +189,28 @@ def ingredients(result: FoodResult) -> list[dict]:
     return [item.model_dump() for item in result.items]
 
 
-def breakdown(items: list[dict], title: str, *, heading: str = 'Calculated') -> str:
-    """Show ingredient-by-ingredient arithmetic for all four nutrients."""
-    lines = [f'{heading} · {title}', 'Source: your Google Sheet first; verified USDA averages for missing basic foods:']
+def breakdown(items: list[dict], title: str, *, heading: str = 'Расчёт') -> str:
+    """Each value is auditable, including clearly identified visual estimates."""
+    lines = [f'{heading} · {title}', 'КБЖУ по ингредиентам (на 100 г × вес / 100):']
     for i, item in enumerate(items, 1):
         grams = item['portion_g']
-        lines.append(f"\n{i}. {item['reference']} — {fmt(grams)} g ({item['source_tab']})")
+        tab = item.get('source_tab') or 'Нет источника'
+        lines.append(f"\n{i}. {item.get('reference') or item['name']} — {fmt(grams)} г"
+                     + (' (вес оценён)' if item.get('weight_estimated') else '')
+                     + f"\n  Источник: {tab}")
         if item.get('source_url'):
-            lines.append('  Average reference (not your own ingredient database): ' + item['source_url'])
-        for nutrient, label, units in [('kcal', 'Calories', 'kcal'), ('protein', 'P', 'g'),
-                                       ('fat', 'F', 'g'), ('carbs', 'C', 'g')]:
-            lines.append(f"  {label}: {fmt(item['per100_'+nutrient])} × {fmt(grams)}/100 = {fmt(item[nutrient])} {units}")
-    lines.append(f"\nTOTAL = {macros(DB.totals(items))} (sum of rows)")
+            lines.append('  Данные из открытой базы: ' + item['source_url'])
+        if item.get('estimate_note'):
+            lines.append('  Предположение: ' + str(item['estimate_note'])[:340])
+        for nutrient, label, units in [('kcal', 'Ккал', 'ккал'), ('protein', 'Белки', 'г'),
+                                       ('fat', 'Жиры', 'г'), ('carbs', 'Углеводы', 'г')]:
+            lines.append(f"  {label}: {fmt(item['per100_'+nutrient])} × "
+                         f"{fmt(grams)}/100 = {fmt(item[nutrient])} {units}")
+    lines.append(f"\nИТОГО: {macros(DB.totals(items))}")
+    if any(item.get('weight_estimated') or str(item.get('source_tab', '')).startswith('ОЦЕНКА ИИ')
+           for item in items):
+        lines.append('Внимание: здесь есть примерные оценки по фото/описанию, а не измеренные данные. '
+                     'Можно ответить на сообщение с исправлением веса или состава.')
     return '\n'.join(lines)
 
 
@@ -225,16 +235,16 @@ async def show_long_reply(update: Update, message: str):
 
 
 def missing_answer(exc: MissingReferences) -> str:
-    lines = ['NOT LOGGED: no verified nutrition source or measured weight was available.']
+    lines = ['Пока не записала блюдо: не хватает надёжных данных.']
     if exc.missing:
-        lines.append('No safe match in your spreadsheet or USDA public reference: ' + ', '.join(exc.missing))
-        lines.append('Please provide their values PER 100g in kcal | protein | fat | carbs:')
-        lines.append('/ingredientadd ru | Творог 1.5% | 73 | 12 | 1.5 | 2.7')
-        lines.append('/ingredientadd en | Cottage cheese | 73 | 12 | 1.5 | 2.7')
-        lines.append('/ingredientadd custom | Скир, Скюр | 57 | 10 | 0.2 | 3.5')
+        lines.append('Не нашла в твоей таблице или USDA: ' + ', '.join(exc.missing))
+        lines.append('Можешь написать обычным текстом, например: '
+                     '«Добавь в базу творог 1,5%, на 100 г: 73 ккал, '
+                     'белки 12, жиры 1,5, углеводы 2,7». '
+                     'Я запишу продукт в соответствующий лист.')
     if exc.missing_weights:
-        lines.append('Please provide the actual gram weights for: ' + ', '.join(exc.missing_weights))
-    lines.append('After adding values or specifying weights, resend the meal. No part was saved.')
+        lines.append('Уточни вес (г): ' + ', '.join(exc.missing_weights))
+    lines.append('Когда уточним данные, отправь описание блюда снова.')
     return '\n'.join(lines)
 
 
@@ -243,11 +253,13 @@ async def analyze(text: str, media: bytes | None = None, mime: str | None = None
     if SHEETS is None:
         raise ValueError('Spreadsheet credentials missing. Cannot log nutrition without references.')
     references = await asyncio.to_thread(SHEETS.ingredients)
+    photo = bool(media and mime and mime.startswith('image/'))
     result = await asyncio.to_thread(AI.interpret, text=text, media=media, mime=mime,
                                      force_log=force_log, correction=correction,
-                                     references=references)
+                                     references=references, photo=photo)
     if result.action != 'ignore':
-        await asyncio.to_thread(calculate_from_table, result, references, ONLINE_LOOKUP.resolve)
+        allow_estimates = photo or bool(result.restaurant_estimate)
+        await asyncio.to_thread(calculate_from_table, result, references, ONLINE_LOOKUP.resolve, allow_estimates)
     return result
 
 async def sync_day(day: str) -> int:
@@ -313,6 +325,8 @@ async def process_food(update: Update, *, text: str, media: bytes | None = None,
             return
         await save_and_confirm(update, result, text, source_kind)
     except MissingReferences as exc:
+        if len(exc.missing) == 1 and exc.missing[0] != 'Не удалось распознать ингредиенты':
+            DB.save_pending_ingredient(update.effective_user.id, {'name': exc.missing[0]})
         await show_long_reply(update, missing_answer(exc))
     except Exception:
         logger.exception('Nutrition analysis failed')
@@ -612,6 +626,10 @@ async def normal_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = (message.text or message.caption or '').strip()
     # In a shared chat, replying to a bot confirmation with text revises that specific meal.
+    if text and not (message.photo or message.voice or message.audio):
+        handled = await handle_ingredient_chat(update, text)
+        if handled:
+            return
     if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_bot:
         existing = DB.by_reply(ALLOWED_CHAT_ID, message.reply_to_message.message_id)
         if existing and text and not (message.photo or message.voice):
