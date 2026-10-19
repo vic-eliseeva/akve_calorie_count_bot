@@ -73,10 +73,45 @@ estimate_note ОБЯЗАТЕЛЬНО объясняет неопределённ
 Никогда не утверждай, что запись уже сохранена.
 """
 
+class IngredientChange(BaseModel):
+    """Explicit ingredient values supplied by the user, never inferred from memory."""
+    action: Literal['add', 'ignore'] = 'ignore'
+    name: str | None = None
+    kind: Literal['ru', 'en', 'custom'] | None = None
+    aliases: list[str] = Field(default_factory=list)
+    kcal: float | None = None
+    protein: float | None = None
+    fat: float | None = None
+    carbs: float | None = None
+    basis_g: float | None = None
+
+INGREDIENT_PROMPT = """Извлеки в JSON намерение добавить ингредиент в БАЗУ.
+Игнорируй «добавь мне на обед» (это лог, не справочник).
+Когда есть открытый запрос уточнения данных — action=add.
+Значения kcal/белки/жиры/углеводы возьми ТОЛЬКО явно названные пользователем.
+Все отсутствующие оставляй null, ноль можно только если явно назван.
+basis_g — масса, на которую приходятся макросы. 100 ТОЛЬКО при указании
+«на 100 г»/«per 100g». Если сказали «на упаковку 150 г» — basis_g=150.
+Если единица измерения неясна — null; никогда не предполагай 100 г.
+Имя должно точно следовать тексту или ожидающему контексту. kind=ru для
+русских базовых ингредиентов, en для английских, custom для брендовых/личных.
+Если неизвестно, null. Никогда не придумывай значения, даже типичные.
+"""
+
 class NutritionAI:
     def __init__(self, api_key: str, model: str):
         self.client = genai.Client(api_key=api_key)
         self.model = model
+
+    def parse_ingredient_change(self, text: str, pending: dict | None = None) -> IngredientChange:
+        prompt = 'Сообщение: ' + text + '\nОжидаемые данные: ' + json.dumps(pending or {}, ensure_ascii=False)
+        response = self.client.models.generate_content(
+            model=self.model, contents=[prompt],
+            config=types.GenerateContentConfig(system_instruction=INGREDIENT_PROMPT,
+                response_mime_type='application/json', response_schema=IngredientChange,
+                temperature=0.0))
+        parsed = response.parsed
+        return parsed if isinstance(parsed, IngredientChange) else IngredientChange.model_validate_json(response.text)
 
     def interpret(self, *, text: str = '', media: bytes | None = None, mime: str | None = None,
                   force_log: bool = False, correction: dict | None = None,
